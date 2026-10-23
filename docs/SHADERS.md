@@ -117,13 +117,18 @@ The manifest is the input model for rung 2 (GLSL → SPIR-V → MSL translation)
 
 ### Installed pack inventory (2026-10-23)
 
-| Pack | Programs | GLSL | GL 4.1 verdict |
+| Pack | Programs | GLSL | GL 4.1 result |
 | --- | --- | --- | --- |
-| Insanity Universal 1.650 | 80 | 120 | runs as-is |
-| BSL 10.1.8 | 94 | 130 | runs, 3 compute passes skipped |
-| Solas 3.8 | 83 | 430 | runs, 3 compute passes skipped |
-| Complementary r5.9.3 | 111 | 400 | runs, 3 compute passes skipped |
-| photon 1.4 | 244 | 430 + image load/store + subgroup ops | needs translation (10 compute passes, images) |
+| Insanity Universal 1.650 | 80 | 120 | runs (verified in game) |
+| BSL 10.1.8 | 94 | 130 | expected to run, 3 compute passes skipped |
+| Solas 3.8 | 83 | 430 | **fails**: `glClearTexImage` (GL 4.4 / ARB_clear_texture) unavailable on Apple GL - Iris NPEs |
+| Complementary r5.9.3 | 111 | 400 | runs (verified), 3 compute passes skipped |
+| photon 1.4 | 244 | 430 + image load/store + subgroup ops | **fails**: 17 fragment samplers exceed Apple GL's 16-unit limit |
+
+The two failures are the Metal ladder's concrete targets: Metal allows far more
+per-stage texture bindings, and image clear/load-store is native. MMetal itself
+stays healthy when Iris rejects a pack - it simply resumes the normal path once
+Iris disables shaders.
 
 ## 7. Ladder rung 2 — GLSL → SPIR-V → MSL (prototype working)
 
