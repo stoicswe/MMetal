@@ -1,0 +1,189 @@
+name: nightly
+
+# Daily snapshot pre-releases, gated on change (same shape as Endfield_FineWine):
+#
+#   1. changes  - compare the default branch HEAD against the newest `nightly_*` tag.
+#                 Build only when build-affecting paths changed since then; manual
+#                 dispatches always build. A day with no changes produces nothing.
+#   2. build    - ./gradlew build, then package the mod jar + the example style plugin.
+#   3. release  - publish a NEW GitHub PRE-release per run, tagged
+#                 nightly_<mod version>.<UTC date>_<sha>. Every snapshot keeps its own
+#                 assets; nothing is replaced, and the newest sorts to the top.
+#
+# cron timing is best-effort (GitHub can delay scheduled runs).
+
+on:
+  schedule:
+    - cron: "0 6 * * *" # daily 06:00 UTC
+  workflow_dispatch: # manual override: always builds + releases
+
+permissions:
+  contents: write
+
+concurrency:
+  group: nightly
+  cancel-in-progress: false # never kill a nightly mid-build
+
+jobs:
+  changes:
+    name: Detect changes since the last nightly
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      should_build: ${{ steps.gate.outputs.should_build }}
+      short_sha: ${{ steps.gate.outputs.short_sha }}
+      base_sha: ${{ steps.gate.outputs.base_sha }}
+      commits: ${{ steps.gate.outputs.commits }}
+      version: ${{ steps.gate.outputs.version }}
+      stamp: ${{ steps.clock.outputs.stamp }}
+    steps:
+      - name: Record build stamp
+        id: clock
+        shell: bash
+        run: echo "stamp=$(date -u +'%Y%m%d')" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history + tags (baseline = newest nightly_* tag)
+
+      - name: Change gate
+        id: gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          SHORT="$(git rev-parse --short HEAD)"
+          VERSION="$(sed -n 's/^mod_version=//p' gradle.properties | head -1)"
+          echo "short_sha=$SHORT" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION:-0.0.0}" >> "$GITHUB_OUTPUT"
+          echo "event: $GITHUB_EVENT_NAME / head: $SHORT"
+
+          # Baseline: the newest nightly snapshot tag (date part is fixed width, so the
+          # tag name sorts chronologically).
+          LATEST="$(git for-each-ref 'refs/tags/nightly_*' --sort=-refname --count=1 --format='%(refname:short)')"
+          if [ -n "$LATEST" ]; then
+            BASE="$(git rev-parse "${LATEST}^{}")"
+            echo "baseline ($LATEST): $BASE"
+          else
+            BASE="$(git rev-list --max-parents=0 HEAD)"
+            echo "no previous nightly tag -> first nightly"
+          fi
+
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "manual dispatch -> forced build"
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+          else
+            CHANGED="$(git diff --name-only "$BASE"..HEAD -- \
+              src gradle styles build.gradle build.gradle.kts settings.gradle \
+              settings.gradle.kts gradle.properties .github/workflows || true)"
+            if [ -n "$CHANGED" ]; then
+              echo "build-affecting changes:"
+              echo "$CHANGED"
+              echo "should_build=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "no build-affecting changes since ${LATEST:-the initial commit} -> skipping"
+              echo "should_build=false" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+
+          {
+            echo "base_sha=$BASE"
+            echo "commits<<EOT"
+            git log --oneline --no-decorate "$BASE"..HEAD | head -50
+            echo "EOT"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Summary
+        shell: bash
+        run: |
+          echo "build=${{ steps.gate.outputs.should_build }}"
+          echo "base=${{ steps.gate.outputs.base_sha }}"
+
+  build:
+    name: Build
+    needs: changes
+    if: needs.changes.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Java 25 (required by Minecraft 26.3 & Fabric Loom)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Validate Gradle wrapper
+        uses: gradle/actions/wrapper-validation@v4
+
+      - name: Build
+        run: ./gradlew build --stacktrace --no-daemon
+
+      - name: Collect release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          for jar in build/libs/*.jar; do
+            case "$jar" in
+              *-sources.jar|*-javadoc.jar|*-dev.jar) ;;
+              *) cp "$jar" dist/ ;;
+            esac
+          done
+          # Example style plugin: packaged from the committed metallib (no xcrun on Linux).
+          if [ -f styles/legends/assets/mmetal_legends/metal/legends.metallib ]; then
+            (cd styles/legends && zip -q -r "$GITHUB_WORKSPACE/dist/mmetal-style-legends.jar" \
+              fabric.mod.json mmetal assets)
+          else
+            echo "::warning::Legends metallib missing - skipping the example style plugin"
+          fi
+          ls -la dist
+
+      - name: Upload assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-assets
+          path: dist/*.jar
+          if-no-files-found: error
+
+  release:
+    name: Publish pre-release
+    needs: [changes, build]
+    if: needs.changes.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Download assets
+        uses: actions/download-artifact@v4
+        with:
+          name: nightly-assets
+          path: dist
+
+      - name: Publish nightly pre-release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: nightly_${{ needs.changes.outputs.version }}.${{ needs.changes.outputs.stamp }}_${{ needs.changes.outputs.short_sha }}
+          name: "Nightly ${{ needs.changes.outputs.stamp }} (${{ needs.changes.outputs.short_sha }})"
+          prerelease: true
+          draft: false
+          files: dist/*.jar
+          fail_on_unmatched_files: true
+          body: |
+            Automatic nightly snapshot of `${{ needs.changes.outputs.short_sha }}` (${{ needs.changes.outputs.stamp }} UTC).
+
+            ### Assets
+            - **`mmetal-*.jar`** - the mod; drop it into `.minecraft/mods`
+            - **`mmetal-style-legends.jar`** - example style plugin (optional); also into `mods/`
+
+            ### Changes since the last nightly
+            ```
+            ${{ needs.changes.outputs.commits }}
+            ```
+
+            Nightlies are untested snapshots. Use a tagged release for normal play.
+            Requires Fabric Loader 0.20.1+, Java 25+ and a HotSpot JDK (Temurin) on macOS.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

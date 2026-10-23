@@ -179,6 +179,13 @@ Full details — FFI layer, IOSurface sync rules, kernels, failure policy — in
 
 Every push/PR builds the jar on `ubuntu-latest` with Temurin 25 (`.github/workflows/build.yml`); artifacts are uploaded and attached to GitHub Releases on tag builds.
 
+**Nightly pre-releases** (`.github/workflows/nightly.yml`) run once a day at 06:00 UTC
+(and on demand) — but only when `src/`, the build files, `styles/` or the workflows
+changed since the newest `nightly_*` tag. Each run publishes a new pre-release
+(`nightly_<version>.<date>_<sha>`) containing the mod jar and the example Legends style
+plugin; snapshots are never overwritten. Run it manually any time with
+**Actions → nightly → Run workflow**.
+
 ## Credits
 
 Architecture and quality targets were informed by [LoreanXavier/pt-pc](https://github.com/LoreanXavier/pt-pc) (native P.T. port): render-scale → hardware upscaler → post effects → display transform, with separate UI presentation and per-preset quality tiers.
