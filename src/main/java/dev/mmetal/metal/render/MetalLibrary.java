@@ -31,7 +31,6 @@ public final class MetalLibrary {
 	private final MemorySegment volumetricPipeline;
 	private final MemorySegment motionBlurPipeline;
 	private final MemorySegment tonemapPipeline;
-	private final MemorySegment stylePipeline;
 	private final MemorySegment reflectionsPipeline;
 	private final MemorySegment giPipeline;
 	private final MemorySegment bloomExtractPipeline;
@@ -42,7 +41,7 @@ public final class MetalLibrary {
 	private MetalLibrary(MemorySegment library, MemorySegment depthPipeline, MemorySegment ssrPipeline,
 	                     MemorySegment compositePipeline, MemorySegment motionPipeline,
 	                     MemorySegment volumetricPipeline, MemorySegment motionBlurPipeline,
-	                     MemorySegment tonemapPipeline, MemorySegment stylePipeline,
+	                     MemorySegment tonemapPipeline,
 	                     MemorySegment reflectionsPipeline,
 	                     MemorySegment giPipeline, MemorySegment bloomExtractPipeline,
 	                     MemorySegment bloomBlurPipeline, MemorySegment rtShadowPipeline,
@@ -55,7 +54,6 @@ public final class MetalLibrary {
 		this.volumetricPipeline = volumetricPipeline;
 		this.motionBlurPipeline = motionBlurPipeline;
 		this.tonemapPipeline = tonemapPipeline;
-		this.stylePipeline = stylePipeline;
 		this.reflectionsPipeline = reflectionsPipeline;
 		this.giPipeline = giPipeline;
 		this.bloomExtractPipeline = bloomExtractPipeline;
@@ -71,23 +69,7 @@ public final class MetalLibrary {
 			}
 			Path temp = Files.createTempFile("mmetal-raytrace", ".metallib");
 			Files.copy(in, temp, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
-			MemorySegment pathStr = MetalNative.stringToNsString(temp.toAbsolutePath().toString());
-			MethodHandle fileUrl = ObjC.send(FunctionDescriptor.of(POINTER, POINTER, POINTER, POINTER));
-			MemorySegment url = (MemorySegment) ObjCSend.invoke(fileUrl,
-				ObjC.cls("NSURL"), ObjC.sel("fileURLWithPath:"), pathStr);
-			if (url == null || url.address() == 0) {
-				throw new IllegalStateException("NSURL fileURLWithPath: failed");
-			}
-			MemorySegment errorSlot = MetalNative.sharedArena().allocate(POINTER);
-			errorSlot.set(ValueLayout.ADDRESS, 0, MemorySegment.NULL);
-			MemorySegment library = (MemorySegment) ObjCSend.invoke(MH_NEW_LIBRARY_URL,
-				MetalNative.device(), ObjC.sel("newLibraryWithURL:error:"),
-				url, errorSlot);
-			if (library == null || library.address() == 0) {
-				MemorySegment error = errorSlot.get(ValueLayout.ADDRESS, 0);
-				String detail = error.address() != 0 ? MetalNative.nsErrorDescription(error) : "unknown error";
-				throw new IllegalStateException("newLibraryWithURL failed: " + detail);
-			}
+			MemorySegment library = loadLibraryFromPath(temp);
 			return new MetalLibrary(
 				library,
 				MetalNative.computePipeline(library, "mm_depth"),
@@ -97,7 +79,6 @@ public final class MetalLibrary {
 				MetalNative.computePipeline(library, "mm_volumetric"),
 				MetalNative.computePipeline(library, "mm_motionblur"),
 				MetalNative.computePipeline(library, "mm_tonemap"),
-				MetalNative.computePipeline(library, "mm_style"),
 				MetalNative.computePipeline(library, "mm_reflections"),
 				MetalNative.computePipeline(library, "mm_rtgi"),
 				MetalNative.computePipeline(library, "mm_bloom_extract"),
@@ -106,6 +87,59 @@ public final class MetalLibrary {
 				MetalNative.computePipeline(library, "mm_world_light"));
 		} catch (Exception e) {
 			throw new IllegalStateException("Failed to load MMetal Metal library", e);
+		}
+	}
+
+	/** Loads a metallib file into an MTLLibrary. */
+	private static MemorySegment loadLibraryFromPath(Path metallib) throws Exception {
+		MemorySegment pathStr = MetalNative.stringToNsString(metallib.toAbsolutePath().toString());
+		MethodHandle fileUrl = ObjC.send(FunctionDescriptor.of(POINTER, POINTER, POINTER, POINTER));
+		MemorySegment url = (MemorySegment) ObjCSend.invoke(fileUrl,
+			ObjC.cls("NSURL"), ObjC.sel("fileURLWithPath:"), pathStr);
+		if (url == null || url.address() == 0) {
+			throw new IllegalStateException("NSURL fileURLWithPath: failed");
+		}
+		MemorySegment errorSlot = MetalNative.sharedArena().allocate(POINTER);
+		errorSlot.set(ValueLayout.ADDRESS, 0, MemorySegment.NULL);
+		MemorySegment library = (MemorySegment) ObjCSend.invoke(MH_NEW_LIBRARY_URL,
+			MetalNative.device(), ObjC.sel("newLibraryWithURL:error:"),
+			url, errorSlot);
+		if (library == null || library.address() == 0) {
+			MemorySegment error = errorSlot.get(ValueLayout.ADDRESS, 0);
+			String detail = error.address() != 0 ? MetalNative.nsErrorDescription(error) : "unknown error";
+			throw new IllegalStateException("newLibraryWithURL failed: " + detail);
+		}
+		return library;
+	}
+
+	/**
+	 * Loads a single compute kernel from an external metallib file. Used by style
+	 * plugins (see {@code dev.mmetal.api.MMetalStyle}).
+	 */
+	public static MemorySegment loadKernel(Path metallib, String kernelName) {
+		try {
+			// Plugin metallibs live inside mod jars; NSURL cannot open a zip entry, so
+			// stage the bytes into a real temp file first.
+			Path staged = Files.createTempFile("mmetal-style", ".metallib");
+			Files.copy(metallib, staged, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+			return MetalNative.computePipeline(loadLibraryFromPath(staged), kernelName);
+		} catch (Exception e) {
+			throw new IllegalStateException("Failed to load style kernel '" + kernelName
+				+ "' from " + metallib, e);
+		}
+	}
+
+	/** Loads a single kernel from a metallib on the classpath. */
+	public static MemorySegment loadKernelFromResource(String resource, String kernelName) {
+		try (InputStream in = MetalLibrary.class.getResourceAsStream(resource)) {
+			if (in == null) {
+				throw new IllegalStateException("metallib not found on the classpath: " + resource);
+			}
+			Path temp = Files.createTempFile("mmetal-style", ".metallib");
+			Files.copy(in, temp, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+			return loadKernel(temp, kernelName);
+		} catch (Exception e) {
+			throw new IllegalStateException("Failed to load style metallib " + resource, e);
 		}
 	}
 
@@ -123,10 +157,6 @@ public final class MetalLibrary {
 
 	public MemorySegment tonemapPipeline() {
 		return tonemapPipeline;
-	}
-
-	public MemorySegment stylePipeline() {
-		return stylePipeline;
 	}
 
 	public MemorySegment reflectionsPipeline() {

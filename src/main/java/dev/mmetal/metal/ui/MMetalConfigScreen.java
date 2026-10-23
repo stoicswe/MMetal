@@ -1,5 +1,7 @@
 package dev.mmetal.metal.ui;
 
+import dev.mmetal.api.MMetalStyle;
+import dev.mmetal.api.MMetalStyles;
 import dev.mmetal.metal.config.MMetalConfig;
 import dev.mmetal.metal.nativebridge.MetalFx;
 import dev.mmetal.metal.nativebridge.MetalNative;
@@ -212,22 +214,26 @@ public final class MMetalConfigScreen extends Screen {
 		section("About");
 		int y = nextRow();
 		if (y >= 0) {
-			Button about = Button.builder(
-					Component.literal(currentStyleDescription()), b -> {
-					})
+			Button about = Button.builder(Component.literal(currentStyleDescription()), b -> {
+				})
 				.bounds(rowX(), y, rowW(), BH).build();
 			about.active = false;
 			addRenderableWidget(about);
 		}
+		int hintY = nextRow();
+		if (hintY >= 0) {
+			Button hint = Button.builder(
+					Component.literal("Drop style jars in mods/ - see docs/STYLES.md"), b -> {
+					})
+				.bounds(rowX(), hintY, rowW(), BH).build();
+			hint.active = false;
+			addRenderableWidget(hint);
+		}
 	}
 
 	private String currentStyleDescription() {
-		MMetalConfig.Style style = config.style;
-		if (style == null) {
-			return "";
-		}
-		String text = style.description;
-		// Keep the disabled button's label readable in the narrow row.
+		MMetalStyle style = MMetalStyles.get(config.styleId);
+		String text = style.description() == null ? "" : style.description();
 		return text.length() > 58 ? text.substring(0, 55) + "..." : text;
 	}
 
@@ -236,20 +242,33 @@ public final class MMetalConfigScreen extends Screen {
 		if (y < 0) {
 			return;
 		}
-		addRenderableWidget(Button.builder(styleLabel(), b -> {
-			MMetalConfig.Style[] styles = MMetalConfig.Style.values();
-			int next = ((config.style == null ? 0 : config.style.ordinal()) + 1) % styles.length;
-			config.style = styles[next];
+		Button button = Button.builder(styleLabel(), b -> {
+			java.util.List<MMetalStyle> styles = MMetalStyles.all();
+			int index = 0;
+			for (int i = 0; i < styles.size(); i++) {
+				if (styles.get(i).id().equalsIgnoreCase(config.styleId)) {
+					index = i;
+					break;
+				}
+			}
+			MMetalStyle next = styles.get((index + 1) % styles.size());
+			config.styleId = next.id();
+			if (config.styleStrength <= 0.01) {
+				config.styleStrength = next.defaultStrength();
+			}
 			b.setMessage(styleLabel());
 			MetalPipeline.onConfigMutated();
 			rebuildWidgets();
-		}).bounds(rowX(), y, rowW(), BH).build());
+		}).bounds(rowX(), y, rowW(), BH).build();
+		// Nothing to choose from: keep the button visible but inert.
+		button.active = MMetalStyles.all().size() > 1;
+		addRenderableWidget(button);
 	}
 
 	private Component styleLabel() {
-		MMetalConfig.Style style = config.style == null ? MMetalConfig.Style.NONE : config.style;
-		String suffix = style.implemented() ? "" : " (soon)";
-		return Component.literal("Style: " + style.label + suffix);
+		MMetalStyle style = MMetalStyles.get(config.styleId);
+		String tag = style.builtIn() ? "" : " (mod)";
+		return Component.literal("Style: " + style.displayName() + tag);
 	}
 
 	// ---------------------------------------------------------------- rows
@@ -402,7 +421,7 @@ public final class MMetalConfigScreen extends Screen {
 		config.upscaleMode = MMetalConfig.UpscaleMode.SPATIAL;
 		config.frameInterpolation = false;
 		config.hdrOutput = false;
-		config.style = MMetalConfig.Style.NONE;
+		config.styleId = "none";
 		config.styleStrength = 1.0;
 		config.effects = new MMetalConfig.Effects();
 		MetalPipeline.onConfigMutated();

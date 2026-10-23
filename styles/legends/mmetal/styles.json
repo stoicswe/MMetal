@@ -1,0 +1,13 @@
+{
+  "styles": [
+    {
+      "id": "legends",
+      "name": "Legends",
+      "description": "Painterly storybook look: aerial perspective, soft painted block edges, warm grade.",
+      "metallib": "assets/mmetal_legends/metal/legends.metallib",
+      "kernel": "legends_style",
+      "strength": 1.0,
+      "customFloats": 1
+    }
+  ]
+}

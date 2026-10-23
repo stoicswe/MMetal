@@ -4,6 +4,7 @@ import dev.mmetal.metal.config.MMetalConfig;
 import dev.mmetal.metal.hook.Compat;
 import dev.mmetal.metal.nativebridge.SystemInfo;
 import dev.mmetal.metal.render.MetalPipeline;
+import dev.mmetal.style.StyleDiscovery;
 import dev.mmetal.metal.ui.MMetalCommands;
 import dev.mmetal.metal.ui.MMetalKeybinds;
 import net.fabricmc.api.ClientModInitializer;
@@ -44,6 +45,9 @@ public final class MetalFxMod implements ClientModInitializer {
 			System.getProperty("java.version"),
 			Compat.isSodiumPresent() ? "present" : "absent",
 			Compat.isIrisPresent() ? "present" : "absent");
+		// Discover style plugins (shader-only jars and code entrypoints) before the
+		// pipeline reads the configured style id.
+		StyleDiscovery.discover();
 		MetalPipeline.initialize(MMetalConfig.load());
 		MMetalCommands.register();
 		MMetalKeybinds.register();

@@ -2,6 +2,8 @@ package dev.mmetal.metal.render;
 
 import com.mojang.blaze3d.pipeline.RenderTarget;
 import com.mojang.renderpearl.backend.opengl.GlTexture;
+import dev.mmetal.api.MMetalStyle;
+import dev.mmetal.api.MMetalStyles;
 import dev.mmetal.metal.config.MMetalConfig;
 import dev.mmetal.metal.nativebridge.MetalFx;
 import dev.mmetal.metal.nativebridge.MetalNative;
@@ -158,6 +160,8 @@ public final class MetalPipeline {
 	private MemorySegment spatialScaler;
 	private MemorySegment temporalScaler;
 	private MemorySegment frameInterpolator;
+	private boolean depthCapturedThisFrame;
+	private final java.util.Map<String, MemorySegment> externalStylePipelines = new java.util.HashMap<>();
 	private int presentProgram;
 	private int depthProgram;
 	private long lastFrameNanos;
@@ -222,6 +226,82 @@ public final class MetalPipeline {
 
 	public boolean isDisabled() {
 		return disabled;
+	}
+
+	/**
+	 * Captures the world depth into the IOSurface BEFORE the GUI phase runs: the vanilla
+	 * GUI clears the main target's depth attachment (GuiRenderer.draw), so a capture
+	 * taken at present time would see "far" everywhere. Called from GuiRenderer.draw HEAD.
+	 */
+	public static void captureDepthEarly() {
+		MetalPipeline p = instance;
+		if (p == null || p.disabled || !p.config.enabled || !p.bootstrapped
+			|| p.inDepth == null || p.depthProgram == 0 || p.scaledW <= 0
+			|| p.depthCapturedThisFrame) {
+			return;
+		}
+		Minecraft mc = Minecraft.getInstance();
+		if (mc == null || mc.gameRenderer == null) {
+			return;
+		}
+		var main = mc.gameRenderer.mainRenderTarget();
+		if (main == null || main.width <= 0 || main.height <= 0) {
+			return;
+		}
+		p.depthCapturedThisFrame = true;
+		p.captureDepth(main, main.width, main.height);
+	}
+
+	/** GPU-side depth pack: main depth attachment -> packed BGRA8 IOSurface. */
+	private void captureDepth(com.mojang.blaze3d.pipeline.RenderTarget main, int inW, int inH) {
+		int savedProgram = glGetInteger(GL_CURRENT_PROGRAM);
+		int savedVao = glGetInteger(GL_VERTEX_ARRAY_BINDING);
+		int savedDrawFb = glGetInteger(GL_DRAW_FRAMEBUFFER_BINDING);
+		int savedReadFb = glGetInteger(GL_READ_FRAMEBUFFER_BINDING);
+		int[] vp = new int[4];
+		glGetIntegerv(GL_VIEWPORT, vp);
+		int savedSampler = glGetInteger(GL_SAMPLER_BINDING);
+		int savedTex2D = glGetInteger(GL_TEXTURE_BINDING_2D);
+		int savedActive = glGetInteger(GL_ACTIVE_TEXTURE);
+		// The capture runs mid-frame (GUI phase start / present), where the world pass
+		// may have left the scissor/depth/cull tests enabled. A scissored fullscreen
+		// draw silently writes nothing, which is exactly how the packed depth ended up
+		// all-zero (haze at max everywhere, effects starved of depth).
+		boolean savedBlend = glIsEnabled(GL_BLEND);
+		boolean savedDepthTest = glIsEnabled(GL_DEPTH_TEST);
+		boolean savedScissor = glIsEnabled(GL_SCISSOR_TEST);
+		boolean savedCull = glIsEnabled(GL_CULL_FACE);
+		try {
+			glDisable(GL_BLEND);
+			glDisable(GL_DEPTH_TEST);
+			glDisable(GL_SCISSOR_TEST);
+			glDisable(GL_CULL_FACE);
+			int depthGlId = textureGlId(main.getDepthTexture());
+			gl.bindFboWithColor(gl.dstFbo(), inDepth.glTexture, GL_TEXTURE_RECTANGLE, scaledW, scaledH);
+			glUseProgram(depthProgram);
+			glActiveTexture(GL_TEXTURE0);
+			glBindTexture(GL_TEXTURE_2D, depthGlId);
+			glBindSampler(0, gl.nearestSampler());
+			glUniform2f(glGetUniformLocation(depthProgram, "uSize"), inW, inH);
+			gl.drawQuad();
+			glBindSampler(0, 0);
+		} catch (Throwable t) {
+			LOGGER.warn("MMetal early depth capture failed", t);
+		} finally {
+			glBindFramebuffer(GL_DRAW_FRAMEBUFFER, savedDrawFb);
+			glBindFramebuffer(GL_READ_FRAMEBUFFER, savedReadFb);
+			glViewport(vp[0], vp[1], vp[2], vp[3]);
+			glUseProgram(savedProgram);
+			glBindVertexArray(savedVao);
+			glBindSampler(0, savedSampler);
+			glActiveTexture(GL_TEXTURE0);
+			glBindTexture(GL_TEXTURE_2D, savedTex2D);
+			glActiveTexture(savedActive);
+			if (savedBlend) glEnable(GL_BLEND);
+			if (savedDepthTest) glEnable(GL_DEPTH_TEST);
+			if (savedScissor) glEnable(GL_SCISSOR_TEST);
+			if (savedCull) glEnable(GL_CULL_FACE);
+		}
 	}
 
 	/** Render scale in effect while a frame is being rendered (0 disables scaling). */
@@ -427,16 +507,10 @@ public final class MetalPipeline {
 			gl.blitColor(gl.srcFbo(), inW, inH, scaledW, scaledH);
 
 			// ---- 2. Capture depth (packed 24-bit reversed depth in BGRA8) ----
-			if (effects || fi || motionBlur) {
-				int depthGlId = textureGlId(main.getDepthTexture());
-				gl.bindFboWithColor(gl.dstFbo(), inDepth.glTexture, GL_TEXTURE_RECTANGLE, scaledW, scaledH);
-				glUseProgram(depthProgram);
-				glActiveTexture(GL_TEXTURE0);
-				glBindTexture(GL_TEXTURE_2D, depthGlId);
-				glBindSampler(0, gl.nearestSampler());
-				glUniform2f(glGetUniformLocation(depthProgram, "uSize"), inW, inH);
-				gl.drawQuad();
-				glBindSampler(0, 0);
+			// Normally captured at the GUI phase start (before the GUI clears the depth
+			// attachment); fall back to capturing here if that hook did not run.
+			if ((effects || fi || motionBlur || styleActive()) && !depthCapturedThisFrame) {
+				captureDepth(main, inW, inH);
 			}
 			// Make sure the GL queue has COMPLETED the IOSurface writes before Metal
 			// reads them. IOSurface does not auto-synchronize GL<->Metal; glFlush only
@@ -452,7 +526,8 @@ public final class MetalPipeline {
 			lastFrameNanos = now;
 			boolean needDepth = effects || fi || motionBlur || styleActive();
 			long tPipelineStart = System.nanoTime();
-			boolean haveInterp = encodeMetal(upscale, effects, fiDoublePresent, camOk, needDepth, motionBlur);
+			boolean haveInterp = encodeMetal(upscale, effects, fiDoublePresent, camOk, needDepth, motionBlur,
+				!uiOpen);
 			avgPipelineMs = avgPipelineMs * 0.85
 				+ (System.nanoTime() - tPipelineStart) / 1.0e6 * 0.15;
 
@@ -535,6 +610,7 @@ public final class MetalPipeline {
 			frames.advance();
 		}
 		resetPending = false;
+		depthCapturedThisFrame = false;
 	}
 
 	private void presentToWindow(long windowHandle, IosurfacePair source) {
@@ -573,7 +649,7 @@ public final class MetalPipeline {
 	// ------------------------------------------------------------------
 
 	private boolean encodeMetal(boolean upscale, boolean effects, boolean fi, boolean camOk, boolean needDepth,
-	                            boolean motionBlur) {
+	                            boolean motionBlur, boolean depthValid) {
 		long tEncodeStart = System.nanoTime();
 		MemorySegment cmd = MetalNative.newCommandBuffer();
 		if (cmd == null || cmd.address() == 0) {
@@ -679,31 +755,27 @@ public final class MetalPipeline {
 			if (config.effects.tonemap && tonemappedTex != null) {
 				dispatchTonemap(cmd, finalPre, bloom, tonemappedTex);
 				MemorySegment realOut = tonemappedTex;
-				if (style) {
-					dispatchStyle(cmd, tonemappedTex, styleTex);
+				if (style && dispatchLook(cmd, tonemappedTex, styleTex, depthValid)) {
 					realOut = styleTex;
 				}
 				MetalNative.copyTexture(cmd, realOut, outColor.metalTexture, fullW, fullH);
 				if (haveInterp) {
 					dispatchTonemap(cmd, interpPrivateTex, bloom, interpOutTex);
 					MemorySegment interpOut = interpOutTex;
-					if (style) {
-						dispatchStyle(cmd, interpOutTex, styleTex);
+					if (style && dispatchLook(cmd, interpOutTex, styleTex, depthValid)) {
 						interpOut = styleTex;
 					}
 					MetalNative.copyTexture(cmd, interpOut, interpColor.metalTexture, fullW, fullH);
 				}
 			} else {
 				MemorySegment realOut = finalPre;
-				if (style) {
-					dispatchStyle(cmd, finalPre, styleTex);
+				if (style && dispatchLook(cmd, finalPre, styleTex, depthValid)) {
 					realOut = styleTex;
 				}
 				MetalNative.copyTexture(cmd, realOut, outColor.metalTexture, fullW, fullH);
 				if (haveInterp) {
 					MemorySegment interpOut = interpPrivateTex;
-					if (style) {
-						dispatchStyle(cmd, interpPrivateTex, styleTex);
+					if (style && dispatchLook(cmd, interpPrivateTex, styleTex, depthValid)) {
 						interpOut = styleTex;
 					}
 					MetalNative.copyTexture(cmd, interpOut, interpColor.metalTexture, fullW, fullH);
@@ -831,31 +903,68 @@ public final class MetalPipeline {
 		MetalNative.endEncoder(encoder);
 	}
 
-	/** True when a look preset other than NONE is selected with a non-zero strength. */
+	/** True when a registered look (not "none") is selected with a non-zero strength. */
 	private boolean styleActive() {
-		return config.style != null && config.style != MMetalConfig.Style.NONE
-			&& config.styleStrength > 0.01;
+		return config.styleStrength > 0.01 && MMetalStyles.isActive(config.styleId);
+	}
+
+	private MMetalStyle currentStyle() {
+		return MMetalStyles.get(config.styleId);
 	}
 
 	/**
-	 * Applies the selected look to an LDR image after the display transform.
-	 * {@code headroom} carries the style strength (see mm_style in the .metal file).
+	 * Applies the selected look to an LDR image after the display transform. Built-in
+	 * styles use MMetal's {@code mm_style} kernel; contributed styles run their own
+	 * kernel from a metallib (see {@code dev.mmetal.api.MMetalStyle}).
 	 */
-	private void dispatchStyle(MemorySegment cmd, MemorySegment source, MemorySegment destination) {
+	private boolean dispatchLook(MemorySegment cmd, MemorySegment source, MemorySegment destination,
+	                             boolean depthValid) {
+		MMetalStyle style = currentStyle();
+		MemorySegment pipeline = externalStylePipelines.get(style.id());
+		if (pipeline == null) {
+			try {
+				pipeline = style.metallibPath() != null
+					? MetalLibrary.loadKernel(style.metallibPath(), style.kernelName())
+					: MetalLibrary.loadKernelFromResource(style.metallibResource(), style.kernelName());
+				LOGGER.info("MMetal external style loaded: {} (kernel {})", style.id(), style.kernelName());
+			} catch (Throwable t) {
+				LOGGER.warn("MMetal style '{}' failed to load - style disabled for this session",
+					style.id(), t);
+				pipeline = MemorySegment.NULL;
+			}
+			externalStylePipelines.put(style.id(), pipeline);
+		}
+		if (pipeline == null || pipeline.address() == 0) {
+			return false;
+		}
 		MemorySegment encoder = MetalNative.computeEncoder(cmd);
-		MetalNative.setComputePipeline(encoder, library.stylePipeline());
+		MetalNative.setComputePipeline(encoder, pipeline);
 		MetalNative.setTexture(encoder, source, 0);
 		MetalNative.setTexture(encoder, depthR32Tex != null ? depthR32Tex : source, 1);
 		MetalNative.setTexture(encoder, destination, 2);
-		MetalNative.setTexture(encoder, bloomTexA, 3); // sample view - Legends glow
+		MetalNative.setTexture(encoder, bloomTexA, 3);
 		MemorySegment params = writeEffectParams(0.0f);
-		params.set(java.lang.foreign.ValueLayout.JAVA_FLOAT, OFF_STYLE,
-			config.style == null ? 0.0f : (float) config.style.ordinal());
 		params.set(java.lang.foreign.ValueLayout.JAVA_FLOAT, OFF_HEADROOM,
 			(float) Math.max(0.0, Math.min(1.0, config.styleStrength)));
+		params.set(java.lang.foreign.ValueLayout.JAVA_FLOAT, OFF_MB_AMOUNT, depthValid ? 1.0f : 0.0f);
 		MetalNative.setBytes(encoder, params, EFFECT_PARAMS_SIZE, 0);
+		int customCount = Math.max(0, Math.min(64, style.customFloatCount()));
+		if (customCount > 0) {
+			MemorySegment custom = frameArena.allocate(customCount * 4L);
+			float[] values = new float[customCount];
+			try {
+				style.writeCustomParams(values);
+			} catch (Throwable t) {
+				LOGGER.warn("MMetal style '{}' custom params failed", style.id(), t);
+			}
+			for (int i = 0; i < customCount; i++) {
+				custom.set(java.lang.foreign.ValueLayout.JAVA_FLOAT, i * 4L, values[i]);
+			}
+			MetalNative.setBytes(encoder, custom, customCount * 4L, 1);
+		}
 		MetalNative.dispatch(encoder, groupCount(fullW), groupCount(fullH), 8, 8);
 		MetalNative.endEncoder(encoder);
+		return true;
 	}
 
 	private boolean heldLightActive() {
