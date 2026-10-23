@@ -275,6 +275,11 @@ public final class HdrPresenter {
 			ready = false;
 			failed = false; // a later re-enable may retry initialization
 			lastDrawable = null;
+			// Force the next acquire to re-apply geometry: the layer is recreated on
+			// re-enable and must not inherit the previous layer's cached size state.
+			lastWidth = -1;
+			lastHeight = -1;
+			lastScale = 1.0f;
 			logger.info("MMetal HDR: EDR overlay removed");
 		} catch (Throwable t) {
 			logger.warn("MMetal HDR teardown failed", t);

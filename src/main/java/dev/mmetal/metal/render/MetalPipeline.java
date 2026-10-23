@@ -173,6 +173,8 @@ public final class MetalPipeline {
 	private boolean lastEffectsActive;
 	private boolean lastPackOwnsLook;
 	private long lastPresentStartNanos;
+	/** True when this frame is consumed by the HDR tonemap on the same Metal queue. */
+	private boolean hdrEncodeFrame;
 	private int pendingW = -1;
 	private int pendingH = -1;
 	private int pendingStableFrames;
@@ -599,6 +601,10 @@ public final class MetalPipeline {
 			lastFrameNanos = now;
 			boolean needDepth = effects || fi || motionBlur || styleActive();
 			long tPipelineStart = System.nanoTime();
+			// HDR consumes the encoded frame on this same Metal queue (tonemap -> drawable),
+			// so the SDR-only CPU wait below is not needed - and a stalled GPU command
+			// buffer must never freeze the render thread.
+			hdrEncodeFrame = config.hdrOutput && hdrPresenter.isReady();
 			boolean haveInterp = encodeMetal(upscale, effects, fiDoublePresent, camOk, needDepth, motionBlur,
 				!uiOpen, packOwnsLook);
 			avgPipelineMs = avgPipelineMs * 0.85
@@ -722,7 +728,11 @@ public final class MetalPipeline {
 		MetalNative.setBytes(encoder, params, EFFECT_PARAMS_SIZE, 0);
 		MetalNative.dispatch(encoder, groupCount(fullW), groupCount(fullH), 8, 8);
 		MetalNative.endEncoder(encoder);
-		MetalNative.commitAndWait(cmd);
+		// No blocking wait: the drawable presentation is scheduled by Core Animation and
+		// the next frame's encode is ordered after this one on the queue. Waiting here
+		// bought nothing but a render-thread stall (and could freeze the game if the GPU
+		// command buffer never completed).
+		MetalNative.commit(cmd);
 		hdrPresenter.presentDrawable();
 	}
 
@@ -922,11 +932,17 @@ public final class MetalPipeline {
 
 		MetalNative.commit(cmd);
 		long tCommit = System.nanoTime();
-		MetalNative.waitCompleted(cmd);
+		// When HDR is active the frame is consumed on this same Metal queue (tonemap ->
+		// drawable), so no CPU-side wait is required - and a stuck GPU command buffer
+		// must never freeze the render thread. The SDR path still waits: its output is
+		// read back through the shared IOSurface by GL.
+		if (!hdrEncodeFrame) {
+			MetalNative.waitCompleted(cmd);
+		}
 		long tDone = System.nanoTime();
 		MetalStats.encodeMs = (tCommit - tEncodeStart) / 1.0e6;
 		MetalStats.waitMs = (tDone - tCommit) / 1.0e6;
-		MetalStats.gpuMs = MetalNative.gpuTimeMs(cmd);
+		MetalStats.gpuMs = hdrEncodeFrame ? 0.0 : MetalNative.gpuTimeMs(cmd);
 		return haveInterp;
 	}
 
@@ -1561,9 +1577,12 @@ public final class MetalPipeline {
 		if (upscale) {
 			// The spatial scaler is always created as the baseline upscaler; the
 			// temporal scaler is added on top when explicitly requested and supported.
+			// Linear colour processing: the scaler converts sRGB -> linear, scales, and
+			// converts back, which preserves hues. Perceptual mode visibly shifts
+			// gradients (skies) and bands more in 8-bit.
 			spatialScaler = MetalFx.createSpatial(MetalNative.device(),
 				MetalNative.PIXEL_FORMAT_BGRA8_UNORM, MetalNative.PIXEL_FORMAT_BGRA8_UNORM,
-				inW, inH, fullW, fullH, MetalFx.COLOR_PROCESSING_PERCEPTUAL);
+				inW, inH, fullW, fullH, MetalFx.COLOR_PROCESSING_LINEAR);
 			if (config.upscaleMode == MMetalConfig.UpscaleMode.TEMPORAL
 				&& MetalFx.supportsTemporal(MetalNative.device())) {
 				temporalScaler = MetalFx.createTemporal(MetalNative.device(),
