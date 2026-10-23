@@ -615,44 +615,16 @@ public final class MetalPipeline {
 			boolean hdrReady = config.hdrOutput && hdrPresenter.initialize(windowHandle)
 				&& hdrPresenter.isReady();
 			if (hdrReady) {
-				// EDR path: tonemap straight into the Metal drawable, present it.
-				MemorySegment drawableTex = hdrPresenter.acquireDrawable(fullW, fullH);
+				// EDR path: tonemap straight into Metal drawables and present them.
 				MetalStats.edrHeadroom = hdrPresenter.headroom();
-				if (drawableTex == null || drawableTex.address() == 0) {
-					MetalStats.skippedDrawables++;
+				if (fiDoublePresent && haveInterp) {
+					// Interpolated frame first, then the real frame - the same temporal
+					// order as the SDR path. Without this the HDR path shows only the real
+					// frame, so FI's half-rate pacing judders and the interpolated frames
+					// never reach the display.
+					presentHdrFrame(interpPrivateTex);
 				}
-				if (drawableTex != null && drawableTex.address() != 0) {
-					// The HDR tonemap source is what encodeMetal computed (interp or real).
-					MemorySegment cmd = MetalNative.newCommandBuffer();
-					MemorySegment encoder = MetalNative.computeEncoder(cmd);
-					MetalNative.setComputePipeline(encoder, library.tonemapPipeline());
-					MetalNative.setTexture(encoder, hdrSource != null ? hdrSource : postFxTex, 0);
-					MetalNative.setTexture(encoder, hdrBloom != null ? hdrBloom : bloomTexA, 1);
-					MetalNative.setTexture(encoder, drawableTex, 2);
-					if (inWorld != null) {
-						MetalNative.setTexture(encoder, inWorld.metalTexture, 3);
-					}
-					MemorySegment params = writeEffectParams(0.0f);
-					params.set(java.lang.foreign.ValueLayout.JAVA_FLOAT, OFF_TONEMODE, 2.0f);
-					params.set(java.lang.foreign.ValueLayout.JAVA_FLOAT, OFF_HEADROOM, hdrPresenter.headroom());
-					params.set(java.lang.foreign.ValueLayout.JAVA_FLOAT, OFF_EXPOSURE,
-						(float) (config.effects.exposure * config.hdrBrightness));
-					params.set(java.lang.foreign.ValueLayout.JAVA_FLOAT, OFF_HDR_DARKNESS,
-						(float) config.hdrDarkness);
-					// Only add bloom when this frame actually produced a bloom texture -
-					// otherwise the stale one (e.g. from the loading screen) ghosts into
-					// the frame at the configured strength.
-					params.set(java.lang.foreign.ValueLayout.JAVA_FLOAT, OFF_BLOOM,
-						hdrBloom != null ? (float) config.effects.bloomStrength : 0.0f);
-					// Keep GUI/HUD pixels at SDR appearance (world-only capture vs full frame).
-					params.set(java.lang.foreign.ValueLayout.JAVA_FLOAT, OFF_UI_MASK,
-						inWorld != null && worldCapturedThisFrame ? 1.0f : 0.0f);
-					MetalNative.setBytes(encoder, params, EFFECT_PARAMS_SIZE, 0);
-					MetalNative.dispatch(encoder, groupCount(fullW), groupCount(fullH), 8, 8);
-					MetalNative.endEncoder(encoder);
-					MetalNative.commitAndWait(cmd);
-					hdrPresenter.presentDrawable();
-				}
+				presentHdrFrame(hdrSource != null ? hdrSource : postFxTex);
 			} else {
 				if (!config.hdrOutput) {
 					// Toggling HDR off mid-session: drop the EDR overlay so the GL swap
@@ -709,6 +681,49 @@ public final class MetalPipeline {
 		resetPending = false;
 		depthCapturedThisFrame = false;
 		worldCapturedThisFrame = false;
+	}
+
+	/**
+	 * Tonemaps one pre-display texture straight into an EDR drawable and presents it.
+	 * Used for both the real and the interpolated frame so the HDR path honours frame
+	 * interpolation exactly like the SDR path.
+	 */
+	private void presentHdrFrame(MemorySegment source) {
+		if (source == null || source.address() == 0) {
+			return;
+		}
+		MemorySegment drawableTex = hdrPresenter.acquireDrawable(fullW, fullH);
+		if (drawableTex == null || drawableTex.address() == 0) {
+			MetalStats.skippedDrawables++;
+			return;
+		}
+		MemorySegment cmd = MetalNative.newCommandBuffer();
+		MemorySegment encoder = MetalNative.computeEncoder(cmd);
+		MetalNative.setComputePipeline(encoder, library.tonemapPipeline());
+		MetalNative.setTexture(encoder, source, 0);
+		MetalNative.setTexture(encoder, hdrBloom != null ? hdrBloom : bloomTexA, 1);
+		MetalNative.setTexture(encoder, drawableTex, 2);
+		if (inWorld != null) {
+			MetalNative.setTexture(encoder, inWorld.metalTexture, 3);
+		}
+		MemorySegment params = writeEffectParams(0.0f);
+		params.set(java.lang.foreign.ValueLayout.JAVA_FLOAT, OFF_TONEMODE, 2.0f);
+		params.set(java.lang.foreign.ValueLayout.JAVA_FLOAT, OFF_HEADROOM, hdrPresenter.headroom());
+		params.set(java.lang.foreign.ValueLayout.JAVA_FLOAT, OFF_EXPOSURE,
+			(float) (config.effects.exposure * config.hdrBrightness));
+		params.set(java.lang.foreign.ValueLayout.JAVA_FLOAT, OFF_HDR_DARKNESS,
+			(float) config.hdrDarkness);
+		// Only add bloom when this frame actually produced a bloom texture.
+		params.set(java.lang.foreign.ValueLayout.JAVA_FLOAT, OFF_BLOOM,
+			hdrBloom != null ? (float) config.effects.bloomStrength : 0.0f);
+		// Keep GUI/HUD pixels at SDR appearance (world-only capture vs full frame).
+		params.set(java.lang.foreign.ValueLayout.JAVA_FLOAT, OFF_UI_MASK,
+			inWorld != null && worldCapturedThisFrame ? 1.0f : 0.0f);
+		MetalNative.setBytes(encoder, params, EFFECT_PARAMS_SIZE, 0);
+		MetalNative.dispatch(encoder, groupCount(fullW), groupCount(fullH), 8, 8);
+		MetalNative.endEncoder(encoder);
+		MetalNative.commitAndWait(cmd);
+		hdrPresenter.presentDrawable();
 	}
 
 	private void presentToWindow(long windowHandle, IosurfacePair source) {

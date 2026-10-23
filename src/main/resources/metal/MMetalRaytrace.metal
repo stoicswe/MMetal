@@ -222,12 +222,41 @@ kernel void mm_ssr_shadows(
 //           presentation (values above 1.0 = brighter than SDR white).
 // ----------------------------------------------------------------------------
 
+// Exact piecewise sRGB transfer. A pure pow(2.2) approximation mismatches the real
+// curve in the shadows (it lacks the linear toe), which biases dark gradients and
+// shows up as banding after the display transform.
 static float3 mmetalSrgbToLinear(float3 c) {
-    return pow(c, float3(2.2));
+    float3 lo = c / 12.92;
+    float3 hi = pow(max(c + 0.055, 0.001) / 1.055, float3(2.4));
+    return float3(c.r <= 0.04045 ? lo.r : hi.r,
+                  c.g <= 0.04045 ? lo.g : hi.g,
+                  c.b <= 0.04045 ? lo.b : hi.b);
 }
 
 static float3 mmetalLinearToSrgb(float3 c) {
-    return pow(c, float3(1.0 / 2.2));
+    float3 lo = c * 12.92;
+    float3 hi = 1.055 * pow(max(c, 0.0), float3(1.0 / 2.4)) - 0.055;
+    return float3(c.r <= 0.0031308 ? lo.r : hi.r,
+                  c.g <= 0.0031308 ? lo.g : hi.g,
+                  c.b <= 0.0031308 ? lo.b : hi.b);
+}
+
+// Triangular hash dither (+-1 LSB at 8-bit) applied before writing the display
+// surface: the tonemap/knee and the 8-bit working textures compress gradients, and
+// quantising them without dither bands visible (sky especially).
+static float mmetalHash01(uint2 p, uint seed) {
+    uint n = p.x * 1973u + p.y * 9277u + seed * 26699u;
+    n = (n << 13u) ^ n;
+    n = n * (n * n * 15731u + 789221u) + 1376312589u;
+    return float((n >> 8u) & 0xffffu) / 65535.0;
+}
+
+static float3 mmetalDither8(uint2 gid) {
+    float3 noise = float3(
+        mmetalHash01(gid, 1u) + mmetalHash01(gid, 2u) - 1.0,
+        mmetalHash01(gid, 3u) + mmetalHash01(gid, 4u) - 1.0,
+        mmetalHash01(gid, 5u) + mmetalHash01(gid, 6u) - 1.0);
+    return noise / 255.0;
 }
 
 /** Soft-knee highlight compressor: identity below K, smooth rolloff above. */
@@ -289,7 +318,8 @@ kernel void mm_tonemap(
         float boost = 1.0 + 0.65 * pow(saturate((luma - 0.4) / 0.6), 2.0);
         float shadowW = 1.0 - saturate(luma / 0.25);
         lin *= 1.0 - params.hdrDarkness * shadowW * 0.8;
-        outColor.write(float4(mmetalLinearToSrgb(lin * boost), 1.0), gid);
+        outColor.write(float4(clamp(mmetalLinearToSrgb(lin * boost) + mmetalDither8(gid),
+                                    0.0, 1.0), 1.0), gid);
     } else if (params.tonemapMode > 1.5) {
         // HDR: decode the display-referred frame to scene-linear, then push bright
         // content (sun, sky, glow) into the display's EDR headroom. The OS tonemaps
@@ -323,11 +353,17 @@ kernel void mm_tonemap(
                        uint2(gid.x, (uint)params.viewport.y - 1u - gid.y));
     } else if (params.tonemapMode > 0.5) {
         // Linear-light filmic knee: midtones exact, highlights compressed.
-        outColor.write(float4(mmetalLinearToSrgb(mmetalHighlightKnee(lin)), 1.0), gid);
+        outColor.write(float4(clamp(mmetalLinearToSrgb(mmetalHighlightKnee(lin)) + mmetalDither8(gid),
+                                    0.0, 1.0), 1.0), gid);
     } else {
         // Neutral: display-referred passthrough (the vanilla look). With a graded
         // palette active the graded linear color is re-encoded instead.
-        float3 out = palette != 0 ? mmetalLinearToSrgb(lin) : c;
+        float3 out;
+        if (palette != 0) {
+            out = clamp(mmetalLinearToSrgb(lin) + mmetalDither8(gid), 0.0, 1.0);
+        } else {
+            out = c;
+        }
         outColor.write(float4(out, 1.0), gid);
     }
 }
