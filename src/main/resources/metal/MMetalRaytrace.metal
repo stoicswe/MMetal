@@ -349,8 +349,10 @@ kernel void mm_tonemap(
         }
         // The pipeline's working textures are bottom-up (they are sampled by the GL
         // present quad without a v-flip); a CAMetalLayer drawable is top-down, so the
-        // EDR write flips Y to present upright.
-        outColor.write(float4(hdrOut, 1.0),
+        // EDR write flips Y to present upright. A sub-LSB triangular dither breaks the
+        // remaining quantisation steps the 8-bit source leaves in the linear image.
+        hdrOut += mmetalDither8(gid) * 0.25;
+        outColor.write(float4(max(hdrOut, 0.0), 1.0),
                        uint2(gid.x, (uint)params.viewport.y - 1u - gid.y));
     } else if (params.tonemapMode > 0.5) {
         // Linear-light filmic knee: midtones exact, highlights compressed.

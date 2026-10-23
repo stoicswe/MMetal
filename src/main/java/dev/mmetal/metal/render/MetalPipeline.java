@@ -507,12 +507,15 @@ public final class MetalPipeline {
 		lastPresentStartNanos = tPresentStart;
 		boolean frameGenSafe = fi && !uiOpen;
 
-		// Frame generation only helps when the game cannot reach the display refresh
-		// by itself. If a frame's pipeline cost fits comfortably inside one refresh
-		// interval, present single frames at the native rate instead of halving it.
+		// Frame generation only helps when the game cannot reach the display refresh by
+		// itself. Gate on the MEASURED frame interval (not the pipeline cost: the SDR
+		// path's GPU wait inflates that, which engaged FI at full refresh rate, halved
+		// the frame rate and ghosted). Once doubling, the interval is ~2x vsync, so this
+		// stays engaged (hysteresis); at native rate it stays idle.
 		float refreshHz = displayRefreshHz(mc);
 		double vsyncMs = 1000.0 / Math.max(30.0, refreshHz);
-		boolean fiUseful = avgPipelineMs > vsyncMs * 0.55;
+		float frameMs = deltaTime * 1000.0f;
+		boolean fiUseful = frameMs > vsyncMs * 1.1;
 		fiDoublePresent = frameGenSafe && fiUseful;
 		updateFrameGenerationPacing(mc, fiDoublePresent);
 		applySwapInterval(mc, fiDoublePresent);
