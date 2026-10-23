@@ -10,7 +10,8 @@
     "ScreenInvoker",
     "MinecraftInvoker",
     "DebugScreenOverlayMixin",
-    "FirstPersonHandsAndItemsRendererMixin"
+    "FirstPersonHandsAndItemsRendererMixin",
+    "GuiRendererMixin"
   ],
   "injectors": {
     "defaultRequire": 1
