@@ -1577,12 +1577,13 @@ public final class MetalPipeline {
 		if (upscale) {
 			// The spatial scaler is always created as the baseline upscaler; the
 			// temporal scaler is added on top when explicitly requested and supported.
-			// Linear colour processing: the scaler converts sRGB -> linear, scales, and
-			// converts back, which preserves hues. Perceptual mode visibly shifts
-			// gradients (skies) and bands more in 8-bit.
+			// Perceptual colour processing: correct for 8-bit SDR surfaces. Scaling in
+			// linear space requires 16-bit intermediates - with 8-bit textures the sRGB
+			// decode clusters midtones into very few codes and the re-encode produces
+			// heavy banding (large angular steps in skies).
 			spatialScaler = MetalFx.createSpatial(MetalNative.device(),
 				MetalNative.PIXEL_FORMAT_BGRA8_UNORM, MetalNative.PIXEL_FORMAT_BGRA8_UNORM,
-				inW, inH, fullW, fullH, MetalFx.COLOR_PROCESSING_LINEAR);
+				inW, inH, fullW, fullH, MetalFx.COLOR_PROCESSING_PERCEPTUAL);
 			if (config.upscaleMode == MMetalConfig.UpscaleMode.TEMPORAL
 				&& MetalFx.supportsTemporal(MetalNative.device())) {
 				temporalScaler = MetalFx.createTemporal(MetalNative.device(),
