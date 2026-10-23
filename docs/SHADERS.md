@@ -80,3 +80,32 @@ All FFM/objc_msgSend bindings must respect:
   (`Invalid cacheMode 2`). Use `MetalNative.RESOURCE_STORAGE_*`.
 - Texture descriptor `storageMode` *does* take `MTLStorageMode` — the constants
   are only interchangeable when both encodings are 0 (shared).
+
+## 5. Display palettes
+
+`config.palette` selects the display transform (`/mmetal palette <mode>`, the
+settings Render → Display tab, or `mmetal.json`):
+
+| Palette | SDR | HDR |
+| --- | --- | --- |
+| `FILMIC` (default) | linear-light filmic knee | EDR (tonemap mode 2) |
+| `EXTENDED` | the EDR look without EDR (fixed highlight lift) | EDR (tonemap mode 2) |
+| `VIBRANT` | vanilla-like saturation + micro-contrast, no filmic compression | same grade, then EDR headroom |
+| `NEUTRAL` | raw passthrough (vanilla look) | EDR (tonemap mode 2) |
+
+`VIBRANT` applies its grade in every display path (luma-preserving chroma lift +
+gentle S-curve, `palette@148` in `EffectParams`), which keeps Minecraft's
+saturated look when HDR output is on.
+
+## 6. Ladder rung 1 — pack inspection (implemented)
+
+`/mmetal shaderpack [name]` parses `shaderpacks/*` (zip or folder) through
+`dev.mmetal.metal.shaderpack.IrisPack`: program pairs, `shaders.properties`,
+GLSL versions/extensions, SSBO/image/compute usage, and a GL-4.1 verdict:
+
+- **runs as-is** — the Metal upscale tier already enhances it;
+- **runs with compute passes skipped** — Iris drops `.csh` passes on GL 4.1
+  (Complementary: 3 shadowcomp passes) — the Metal ladder unlocks them;
+- **needs translation** — SSBOs / image load-store / GLSL above 4.1.
+
+The manifest is the input model for rung 2 (GLSL → SPIR-V → MSL translation).

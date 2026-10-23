@@ -92,7 +92,7 @@ public final class MetalPipeline {
 		OFF_MB_AMOUNT = 80, OFF_EXPOSURE = 84, OFF_TONEMODE = 88, OFF_HEADROOM = 92,
 		OFF_REFL_STRENGTH = 96, OFF_GI_STRENGTH = 100, OFF_DENOISE = 104, OFF_BLOOM = 108,
 		OFF_HAND_GLOW = 112, OFF_HAND_POS = 128, OFF_RT_MIX = 136, OFF_STYLE = 140,
-		OFF_HDR_DARKNESS = 144, EFFECT_PARAMS_SIZE = 148;
+		OFF_HDR_DARKNESS = 144, OFF_PALETTE = 148, EFFECT_PARAMS_SIZE = 152;
 	// RtShadowParams layout (mm_rt_shadows).
 	private static final int RT_VIEWPORT = 0, RT_NEAR = 8, RT_FAR = 12, RT_VIEW_ROT_INV = 16,
 		RT_EYE = 80, RT_SUN_DIR = 96, RT_TANHALF = 112, RT_ASPECT = 116, RT_JITTER = 120,
@@ -359,6 +359,7 @@ public final class MetalPipeline {
 					config.renderScale = reloaded.renderScale;
 					config.upscaleMode = reloaded.upscaleMode;
 					config.irisMode = reloaded.irisMode;
+					config.palette = reloaded.palette;
 					config.frameInterpolation = reloaded.frameInterpolation;
 					config.hdrOutput = reloaded.hdrOutput;
 					config.effects = reloaded.effects;
@@ -1176,9 +1177,19 @@ public final class MetalPipeline {
 		buffer.set(java.lang.foreign.ValueLayout.JAVA_FLOAT, OFF_MB_AMOUNT, motionBlurAmount);
 		buffer.set(java.lang.foreign.ValueLayout.JAVA_FLOAT, OFF_EXPOSURE,
 			(float) config.effects.exposure);
-		buffer.set(java.lang.foreign.ValueLayout.JAVA_FLOAT, OFF_TONEMODE,
-			config.effects.tonemap ? 1.0f : 0.0f);
+		// Palette: the display transform (tonemap mode) plus the optional VIBRANT grade.
+		// The HDR present path overrides the mode to 2 (EDR drawable) but keeps the grade.
+		float tonemapMode = switch (config.palette) {
+			case FILMIC -> config.effects.tonemap ? 1.0f : 0.0f;
+			case EXTENDED -> 3.0f;
+			case VIBRANT, NEUTRAL -> 0.0f;
+		};
+		buffer.set(java.lang.foreign.ValueLayout.JAVA_FLOAT, OFF_TONEMODE, tonemapMode);
 		buffer.set(java.lang.foreign.ValueLayout.JAVA_FLOAT, OFF_HEADROOM, 1.0f);
+		buffer.set(java.lang.foreign.ValueLayout.JAVA_FLOAT, OFF_HDR_DARKNESS,
+			(float) config.hdrDarkness);
+		buffer.set(java.lang.foreign.ValueLayout.JAVA_FLOAT, OFF_PALETTE,
+			config.palette == MMetalConfig.Palette.VIBRANT ? 1.0f : 0.0f);
 		buffer.set(java.lang.foreign.ValueLayout.JAVA_FLOAT, OFF_REFL_STRENGTH,
 			(float) (config.effects.enabled && config.effects.reflections
 				? config.effects.reflectionStrength : 0.0));

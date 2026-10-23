@@ -136,6 +136,7 @@ public final class MMetalConfigScreen extends Screen {
 			v -> config.hdrBrightness = v, "x");
 		slider("HDR Shadows (darkness)", config.hdrDarkness, 0.0, 1.0,
 			v -> config.hdrDarkness = v, "");
+		paletteButton();
 		toggle("Filmic Tonemap", () -> config.effects.tonemap, v -> config.effects.tonemap = v);
 		slider("Exposure", config.effects.exposure, 0.25, 3.0,
 			v -> config.effects.exposure = v, "x");
@@ -387,6 +388,30 @@ public final class MMetalConfigScreen extends Screen {
 			case FULL -> "full pipeline";
 		};
 		return Component.literal("With Shaders: " + detail);
+	}
+
+	/** Cycles the display palette (see MMetalConfig.Palette). */
+	private void paletteButton() {
+		int y = nextRow();
+		if (y < 0) {
+			return;
+		}
+		addRenderableWidget(Button.builder(paletteLabel(), b -> {
+			MMetalConfig.Palette[] palettes = MMetalConfig.Palette.values();
+			config.palette = palettes[(config.palette.ordinal() + 1) % palettes.length];
+			b.setMessage(paletteLabel());
+			MetalPipeline.onConfigMutated();
+		}).bounds(rowX(), y, rowW(), BH).build());
+	}
+
+	private Component paletteLabel() {
+		String detail = switch (config.palette) {
+			case FILMIC -> "Filmic (SDR)";
+			case EXTENDED -> "Extended (HDR look)";
+			case NEUTRAL -> "Neutral (raw)";
+			case VIBRANT -> "Vibrant (vanilla-like)";
+		};
+		return Component.literal("Palette: " + detail);
 	}
 
 	private void rayCountButton() {

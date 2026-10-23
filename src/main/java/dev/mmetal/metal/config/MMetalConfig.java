@@ -35,6 +35,22 @@ public final class MMetalConfig {
 	}
 
 	/**
+	 * Display palette (the tonemap/display transform). {@code EXTENDED} is the EDR look
+	 * as an SDR option; {@code VIBRANT} keeps Minecraft's saturated look in both SDR
+	 * and HDR (luma-preserving saturation + micro-contrast, vanilla-style clipping).
+	 */
+	public enum Palette {
+		/** Linear-light filmic knee - the classic SDR look. */
+		FILMIC,
+		/** Extended range: the HDR look without HDR (highlight lift + shadow depth). */
+		EXTENDED,
+		/** No display transform - raw pipeline output. */
+		NEUTRAL,
+		/** Vanilla-like vibrance: saturated, punchy, and applied to HDR output too. */
+		VIBRANT
+	}
+
+	/**
 	 * Render-resolution presets, matching the standard upscaler quality ladder
 	 * (linear scale factors like DLSS/FSR/XeSS).
 	 */
@@ -85,6 +101,9 @@ public final class MMetalConfig {
 
 	/** Behaviour while an Iris shader pack is actively rendering (see {@link IrisMode}). */
 	public IrisMode irisMode = IrisMode.METALFX;
+
+	/** Display palette / tonemap transform (see {@link Palette}). */
+	public Palette palette = Palette.FILMIC;
 
 	/** MetalFX Frame Interpolation (macOS 26+). Set the game's Max FPS to half your refresh rate. */
 	public boolean frameInterpolation = false;
@@ -183,6 +202,9 @@ public final class MMetalConfig {
 		if (irisMode == null) {
 			irisMode = IrisMode.METALFX;
 		}
+		if (palette == null) {
+			palette = Palette.FILMIC;
+		}
 		if (styleId == null || styleId.isBlank()) {
 			styleId = "none";
 		} else {
@@ -208,7 +230,7 @@ public final class MMetalConfig {
 
 	public String summary() {
 		return String.format(Locale.ROOT,
-			"enabled=%s quality=%s upscale=%s iris=%s frameInterpolation=%s effects=%s style=%s",
-			enabled, qualityPreset, upscaleMode, irisMode, frameInterpolation, effects.enabled, styleId);
+			"enabled=%s quality=%s upscale=%s iris=%s palette=%s frameInterpolation=%s effects=%s style=%s",
+			enabled, qualityPreset, upscaleMode, irisMode, palette, frameInterpolation, effects.enabled, styleId);
 	}
 }

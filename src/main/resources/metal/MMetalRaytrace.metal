@@ -46,13 +46,14 @@ struct EffectParams {
     float  rtShadowMix;        // 0..1 blend in the hardware ray-traded shadow texture
     float  styleId;            // mm_style: look id (see MMetalConfig.Style ordinal)
     float  hdrDarkness;        // HDR only: 0 = neutral, 1 = deepest shadow rendition
+    float  palette;            // >0.5 = VIBRANT grade (saturation + micro-contrast)
 };
 // Java-side offsets: viewport@0, near@8, far@12, sunStrength@16, aoStrength@20,
 // steps@24, rayLength@28, sunDirEye@32, time@48, tanHalfFovY@52, aspect@56,
 // sunScreen@64, motionBlurAmount@80, exposure@84, tonemapMode@88, headroom@92,
 // reflectionStrength@96, giStrength@100, denoise@104, bloomStrength@108,
 // handGlow@112, handGlowPos@128, rtShadowMix@136, styleId@140, hdrDarkness@144,
-// size 148.
+// palette@148, size 152.
 // mm_style also reuses headroom@92 as the style strength.
 
 // Per-frame camera parameters for motion vector generation.
@@ -256,12 +257,29 @@ kernel void mm_tonemap(
     float heldGlow = exp(-dot(hd, hd) / 0.008) * params.handGlow.w;
     base += params.handGlow.rgb * heldGlow;
     float3 c = max(base, float3(0.0)) * params.exposure;
+    float3 lin = mmetalSrgbToLinear(saturate(c));
+    // Palette grade (scene-linear). VIBRANT keeps Minecraft's saturated look in every
+    // display path - including HDR - with a luma-preserving chroma lift and a gentle
+    // micro-contrast curve. Other palettes leave the linear color untouched.
+    if (params.palette > 0.5) {
+        float gradeLuma = dot(lin, float3(0.2126, 0.7152, 0.0722));
+        lin = gradeLuma + (lin - gradeLuma) * 1.35;
+        lin = mix(lin, lin * lin * (3.0 - 2.0 * lin), 0.2);
+        lin = max(lin, 0.0);
+    }
 
-    if (params.tonemapMode > 1.5) {
+    if (params.tonemapMode > 2.5) {
+        // Extended SDR palette: the EDR look without EDR - a fixed highlight lift over
+        // the linear image, re-encoded to the 8-bit display surface.
+        float luma = dot(lin, float3(0.2126, 0.7152, 0.0722));
+        float boost = 1.0 + 0.65 * pow(saturate((luma - 0.4) / 0.6), 2.0);
+        float shadowW = 1.0 - saturate(luma / 0.25);
+        lin *= 1.0 - params.hdrDarkness * shadowW * 0.8;
+        outColor.write(float4(mmetalLinearToSrgb(lin * boost), 1.0), gid);
+    } else if (params.tonemapMode > 1.5) {
         // HDR: decode the display-referred frame to scene-linear, then push bright
         // content (sun, sky, glow) into the display's EDR headroom. The OS tonemaps
         // this composite for the actual panel capability.
-        float3 lin = mmetalSrgbToLinear(saturate(c));
         float luma = dot(lin, float3(0.2126, 0.7152, 0.0722));
         float boost = 1.0 + params.headroom * pow(saturate((luma - 0.4) / 0.6), 2.0);
         // Darkness slider: pull shadow luminance down without touching midtones or
@@ -275,10 +293,12 @@ kernel void mm_tonemap(
                        uint2(gid.x, (uint)params.viewport.y - 1u - gid.y));
     } else if (params.tonemapMode > 0.5) {
         // Linear-light filmic knee: midtones exact, highlights compressed.
-        float3 lin = mmetalSrgbToLinear(saturate(c));
         outColor.write(float4(mmetalLinearToSrgb(mmetalHighlightKnee(lin)), 1.0), gid);
     } else {
-        outColor.write(float4(c, 1.0), gid);
+        // Neutral: display-referred passthrough (the vanilla look). With the VIBRANT
+        // grade active the graded linear color is re-encoded instead.
+        float3 out = params.palette > 0.5 ? mmetalLinearToSrgb(lin) : c;
+        outColor.write(float4(out, 1.0), gid);
     }
 }
 
