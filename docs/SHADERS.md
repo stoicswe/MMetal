@@ -91,11 +91,16 @@ settings Render → Display tab, or `mmetal.json`):
 | `FILMIC` (default) | linear-light filmic knee | EDR (tonemap mode 2) |
 | `EXTENDED` | the EDR look without EDR (fixed highlight lift) | EDR (tonemap mode 2) |
 | `VIBRANT` | vanilla-like saturation + micro-contrast, no filmic compression | same grade, then EDR headroom |
-| `NEUTRAL` | raw passthrough (vanilla look) | EDR (tonemap mode 2) |
+| `WARM` | golden/amber tint (luma-preserving) | same tint, then EDR headroom |
+| `COOL` | blue/cyan tint (luma-preserving) | same tint, then EDR headroom |
+| `NATURAL` | raw passthrough | no headroom lift - HDR keeps the SDR look |
+| `NEUTRAL` | raw passthrough | EDR (tonemap mode 2) |
 
-`VIBRANT` applies its grade in every display path (luma-preserving chroma lift +
-gentle S-curve, `palette@148` in `EffectParams`), which keeps Minecraft's
-saturated look when HDR output is on.
+The graded palettes (`VIBRANT`, `WARM`, `COOL`) apply their grade in every display
+path (luma-preserving chroma work, `palette@148` in `EffectParams`), which keeps
+the chosen look when HDR output is on. `NATURAL` is the minimal-processing choice:
+no grade, and the HDR branch suppresses the highlight lift (`headroom = 0`), so
+turning HDR on has as little visual impact as possible.
 
 ## 6. Ladder rung 1 — pack inspection (implemented)
 

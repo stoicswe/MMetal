@@ -36,18 +36,24 @@ public final class MMetalConfig {
 
 	/**
 	 * Display palette (the tonemap/display transform). {@code EXTENDED} is the EDR look
-	 * as an SDR option; {@code VIBRANT} keeps Minecraft's saturated look in both SDR
-	 * and HDR (luma-preserving saturation + micro-contrast, vanilla-style clipping).
+	 * as an SDR option; the graded palettes ({@code VIBRANT}, {@code WARM}, {@code COOL})
+	 * apply their grade in both SDR and HDR; {@code NATURAL} minimises the HDR boost.
 	 */
 	public enum Palette {
 		/** Linear-light filmic knee - the classic SDR look. */
 		FILMIC,
 		/** Extended range: the HDR look without HDR (highlight lift + shadow depth). */
 		EXTENDED,
-		/** No display transform - raw pipeline output. */
-		NEUTRAL,
 		/** Vanilla-like vibrance: saturated, punchy, and applied to HDR output too. */
-		VIBRANT
+		VIBRANT,
+		/** Golden/amber tint, luma-preserving, applied to HDR output too. */
+		WARM,
+		/** Blue/cyan tint, luma-preserving, applied to HDR output too. */
+		COOL,
+		/** Minimal processing: no grade, and HDR keeps the SDR look (no highlight lift). */
+		NATURAL,
+		/** No display transform - raw pipeline output. */
+		NEUTRAL
 	}
 
 	/**

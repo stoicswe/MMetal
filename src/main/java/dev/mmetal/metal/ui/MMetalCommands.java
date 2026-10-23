@@ -93,9 +93,10 @@ public final class MMetalCommands {
 								MetalPipeline.onConfigMutated();
 								feedback("palette = " + config.palette
 									+ " (FILMIC = SDR filmic, EXTENDED = HDR look in SDR,"
-									+ " VIBRANT = vanilla-like saturation, also in HDR, NEUTRAL = raw)");
+									+ " VIBRANT = vanilla-like saturation, WARM/COOL = tinted,"
+									+ " NATURAL = minimal HDR impact, NEUTRAL = raw)");
 							} catch (IllegalArgumentException e) {
-								feedback("Unknown palette - use FILMIC, EXTENDED, NEUTRAL or VIBRANT");
+								feedback("Unknown palette - use FILMIC, EXTENDED, VIBRANT, WARM, COOL, NATURAL or NEUTRAL");
 							}
 							return 1;
 						})))

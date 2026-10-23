@@ -258,14 +258,25 @@ kernel void mm_tonemap(
     base += params.handGlow.rgb * heldGlow;
     float3 c = max(base, float3(0.0)) * params.exposure;
     float3 lin = mmetalSrgbToLinear(saturate(c));
-    // Palette grade (scene-linear). VIBRANT keeps Minecraft's saturated look in every
-    // display path - including HDR - with a luma-preserving chroma lift and a gentle
-    // micro-contrast curve. Other palettes leave the linear color untouched.
-    if (params.palette > 0.5) {
+    // Palette grade (scene-linear). The graded palettes apply in every display path -
+    // including HDR - so the chosen look survives the EDR transform.
+    //   1 = VIBRANT  luma-preserving chroma lift + gentle micro-contrast
+    //   2 = WARM     golden/amber tint (luma-preserving)
+    //   3 = COOL     blue/cyan tint (luma-preserving)
+    //   4 = NATURAL  no grade; HDR also drops the highlight lift below
+    int palette = (int) (params.palette + 0.5);
+    if (palette == 1) {
         float gradeLuma = dot(lin, float3(0.2126, 0.7152, 0.0722));
         lin = gradeLuma + (lin - gradeLuma) * 1.35;
         lin = mix(lin, lin * lin * (3.0 - 2.0 * lin), 0.2);
         lin = max(lin, 0.0);
+    } else if (palette == 2 || palette == 3) {
+        float gradeLuma = dot(lin, float3(0.2126, 0.7152, 0.0722));
+        float3 gains = palette == 2 ? float3(1.10, 1.02, 0.88) : float3(0.90, 1.00, 1.12);
+        float3 tinted = lin * gains;
+        // Re-normalise to the original luma so the tint changes hue, not brightness.
+        tinted *= gradeLuma / max(dot(tinted, float3(0.2126, 0.7152, 0.0722)), 1e-4);
+        lin = tinted;
     }
 
     if (params.tonemapMode > 2.5) {
@@ -281,7 +292,9 @@ kernel void mm_tonemap(
         // content (sun, sky, glow) into the display's EDR headroom. The OS tonemaps
         // this composite for the actual panel capability.
         float luma = dot(lin, float3(0.2126, 0.7152, 0.0722));
-        float boost = 1.0 + params.headroom * pow(saturate((luma - 0.4) / 0.6), 2.0);
+        // NATURAL keeps the SDR look: no headroom lift, just the linear presentation.
+        float headroom = palette == 4 ? 0.0 : params.headroom;
+        float boost = 1.0 + headroom * pow(saturate((luma - 0.4) / 0.6), 2.0);
         // Darkness slider: pull shadow luminance down without touching midtones or
         // highlights (the black-level half of the AAA HDR calibration pair).
         float shadowW = 1.0 - saturate(luma / 0.25);   // 1 near black, 0 by 25% grey
@@ -295,9 +308,9 @@ kernel void mm_tonemap(
         // Linear-light filmic knee: midtones exact, highlights compressed.
         outColor.write(float4(mmetalLinearToSrgb(mmetalHighlightKnee(lin)), 1.0), gid);
     } else {
-        // Neutral: display-referred passthrough (the vanilla look). With the VIBRANT
-        // grade active the graded linear color is re-encoded instead.
-        float3 out = params.palette > 0.5 ? mmetalLinearToSrgb(lin) : c;
+        // Neutral: display-referred passthrough (the vanilla look). With a graded
+        // palette active the graded linear color is re-encoded instead.
+        float3 out = palette != 0 ? mmetalLinearToSrgb(lin) : c;
         outColor.write(float4(out, 1.0), gid);
     }
 }

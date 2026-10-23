@@ -1177,19 +1177,26 @@ public final class MetalPipeline {
 		buffer.set(java.lang.foreign.ValueLayout.JAVA_FLOAT, OFF_MB_AMOUNT, motionBlurAmount);
 		buffer.set(java.lang.foreign.ValueLayout.JAVA_FLOAT, OFF_EXPOSURE,
 			(float) config.effects.exposure);
-		// Palette: the display transform (tonemap mode) plus the optional VIBRANT grade.
-		// The HDR present path overrides the mode to 2 (EDR drawable) but keeps the grade.
+		// Palette: the display transform (tonemap mode) plus the optional grade.
+		// The HDR present path overrides the mode to 2 (EDR drawable) but keeps both.
 		float tonemapMode = switch (config.palette) {
 			case FILMIC -> config.effects.tonemap ? 1.0f : 0.0f;
 			case EXTENDED -> 3.0f;
-			case VIBRANT, NEUTRAL -> 0.0f;
+			case VIBRANT, WARM, COOL, NATURAL, NEUTRAL -> 0.0f;
 		};
 		buffer.set(java.lang.foreign.ValueLayout.JAVA_FLOAT, OFF_TONEMODE, tonemapMode);
 		buffer.set(java.lang.foreign.ValueLayout.JAVA_FLOAT, OFF_HEADROOM, 1.0f);
 		buffer.set(java.lang.foreign.ValueLayout.JAVA_FLOAT, OFF_HDR_DARKNESS,
 			(float) config.hdrDarkness);
-		buffer.set(java.lang.foreign.ValueLayout.JAVA_FLOAT, OFF_PALETTE,
-			config.palette == MMetalConfig.Palette.VIBRANT ? 1.0f : 0.0f);
+		// Grade id for the kernel: 0 none, 1 vibrant, 2 warm, 3 cool, 4 natural.
+		float paletteGrade = switch (config.palette) {
+			case VIBRANT -> 1.0f;
+			case WARM -> 2.0f;
+			case COOL -> 3.0f;
+			case NATURAL -> 4.0f;
+			case FILMIC, EXTENDED, NEUTRAL -> 0.0f;
+		};
+		buffer.set(java.lang.foreign.ValueLayout.JAVA_FLOAT, OFF_PALETTE, paletteGrade);
 		buffer.set(java.lang.foreign.ValueLayout.JAVA_FLOAT, OFF_REFL_STRENGTH,
 			(float) (config.effects.enabled && config.effects.reflections
 				? config.effects.reflectionStrength : 0.0));

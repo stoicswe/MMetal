@@ -408,8 +408,11 @@ public final class MMetalConfigScreen extends Screen {
 		String detail = switch (config.palette) {
 			case FILMIC -> "Filmic (SDR)";
 			case EXTENDED -> "Extended (HDR look)";
-			case NEUTRAL -> "Neutral (raw)";
 			case VIBRANT -> "Vibrant (vanilla-like)";
+			case WARM -> "Warm (golden)";
+			case COOL -> "Cool (blue)";
+			case NATURAL -> "Natural (minimal HDR)";
+			case NEUTRAL -> "Neutral (raw)";
 		};
 		return Component.literal("Palette: " + detail);
 	}
