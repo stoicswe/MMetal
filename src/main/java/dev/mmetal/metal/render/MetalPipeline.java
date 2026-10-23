@@ -1594,10 +1594,14 @@ public final class MetalPipeline {
 		}
 		if (fi && SystemInfo.supportsFrameInterpolation()
 			&& MetalFx.supportsFrameInterpolation(MetalNative.device())) {
+			// The interpolator consumes the POST-upscale frames (finalPre / prevColorTex /
+			// interpPrivateTex are full resolution), so it must be created at full size -
+			// creating it at the pre-upscale size made MetalFX produce smeared frames and
+			// killed the frame rate under any scaling preset.
 			frameInterpolator = MetalFx.createFrameInterpolator(MetalNative.device(),
 				MetalNative.PIXEL_FORMAT_BGRA8_UNORM, MetalNative.PIXEL_FORMAT_BGRA8_UNORM,
 				MetalNative.PIXEL_FORMAT_R32_FLOAT, MetalNative.PIXEL_FORMAT_RG16_FLOAT,
-				inW, inH, fullW, fullH);
+				fullW, fullH, fullW, fullH);
 		}
 
 		if (presentProgram == 0) {

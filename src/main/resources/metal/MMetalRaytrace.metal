@@ -321,18 +321,19 @@ kernel void mm_tonemap(
         outColor.write(float4(clamp(mmetalLinearToSrgb(lin * boost) + mmetalDither8(gid),
                                     0.0, 1.0), 1.0), gid);
     } else if (params.tonemapMode > 1.5) {
-        // HDR: decode the display-referred frame to scene-linear, then push bright
-        // content (sun, sky, glow) into the display's EDR headroom. The OS tonemaps
-        // this composite for the actual panel capability.
+        // HDR: present the SDR image in linear form, with a soft lift only in the upper
+        // midtones/highlights, bounded by the panel's EDR headroom. A strong luma-driven
+        // boost pushes whole gradients past the headroom, where the display clamps them
+        // into flat regions - that is what made skies band.
         float luma = dot(lin, float3(0.2126, 0.7152, 0.0722));
-        // NATURAL keeps the SDR look: no headroom lift, just the linear presentation.
-        float headroom = palette == 4 ? 0.0 : params.headroom;
-        float boost = 1.0 + headroom * pow(saturate((luma - 0.4) / 0.6), 2.0);
+        float headroom = palette == 4 ? 1.0 : max(1.0, params.headroom);
+        float lift = saturate((luma - 0.5) / 0.5);
+        float3 hdrOut = lin * (1.0 + (headroom - 1.0) * 0.35 * lift * lift);
+        hdrOut = min(hdrOut, float3(headroom));
         // Darkness slider: pull shadow luminance down without touching midtones or
         // highlights (the black-level half of the AAA HDR calibration pair).
         float shadowW = 1.0 - saturate(luma / 0.25);   // 1 near black, 0 by 25% grey
-        lin *= 1.0 - params.hdrDarkness * shadowW * 0.8;
-        float3 hdrOut = lin * boost;
+        hdrOut *= 1.0 - params.hdrDarkness * shadowW * 0.8;
         // GUI/HUD stays SDR: pixels the interface touched differ between the full frame
         // and the world-only capture. Those keep the unboosted linear value (= SDR
         // white) instead of being pushed into the EDR headroom. A menu's dimmed
