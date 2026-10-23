@@ -92,7 +92,7 @@ public final class MetalPipeline {
 		OFF_MB_AMOUNT = 80, OFF_EXPOSURE = 84, OFF_TONEMODE = 88, OFF_HEADROOM = 92,
 		OFF_REFL_STRENGTH = 96, OFF_GI_STRENGTH = 100, OFF_DENOISE = 104, OFF_BLOOM = 108,
 		OFF_HAND_GLOW = 112, OFF_HAND_POS = 128, OFF_RT_MIX = 136, OFF_STYLE = 140,
-		OFF_HDR_DARKNESS = 144, OFF_PALETTE = 148, EFFECT_PARAMS_SIZE = 152;
+		OFF_HDR_DARKNESS = 144, OFF_PALETTE = 148, OFF_UI_MASK = 152, EFFECT_PARAMS_SIZE = 156;
 	// RtShadowParams layout (mm_rt_shadows).
 	private static final int RT_VIEWPORT = 0, RT_NEAR = 8, RT_FAR = 12, RT_VIEW_ROT_INV = 16,
 		RT_EYE = 80, RT_SUN_DIR = 96, RT_TANHALF = 112, RT_ASPECT = 116, RT_JITTER = 120,
@@ -141,6 +141,9 @@ public final class MetalPipeline {
 	private MemorySegment privateFullTex;
 	private MemorySegment postFxTex;
 	private MemorySegment maskTex;
+	/** World-only color captured at GUI start, used to keep the UI out of the HDR boost. */
+	private IosurfacePair inWorld;
+	private boolean worldCapturedThisFrame;
 	private MemorySegment prevColorTex;
 	private MemorySegment depthR32Tex;
 	private MemorySegment volumetricTex;
@@ -245,8 +248,7 @@ public final class MetalPipeline {
 	public static void captureDepthEarly() {
 		MetalPipeline p = instance;
 		if (p == null || p.disabled || !p.config.enabled || !p.bootstrapped
-			|| p.inDepth == null || p.depthProgram == 0 || p.scaledW <= 0
-			|| p.depthCapturedThisFrame) {
+			|| p.inDepth == null || p.depthProgram == 0 || p.scaledW <= 0) {
 			return;
 		}
 		Minecraft mc = Minecraft.getInstance();
@@ -257,8 +259,29 @@ public final class MetalPipeline {
 		if (main == null || main.width <= 0 || main.height <= 0) {
 			return;
 		}
-		p.depthCapturedThisFrame = true;
-		p.captureDepth(main, main.width, main.height);
+		if (!p.depthCapturedThisFrame) {
+			p.depthCapturedThisFrame = true;
+			p.captureDepth(main, main.width, main.height);
+		}
+		// HDR keeps the world in EDR but must leave the GUI/HUD at SDR appearance: grab
+		// the world-only frame before the GUI draws so the tonemap can tell them apart.
+		if (!p.worldCapturedThisFrame && p.config.hdrOutput && p.hdrPresenter.isReady()
+			&& p.inWorld != null) {
+			p.worldCapturedThisFrame = true;
+			p.captureWorldColor(main, main.width, main.height);
+		}
+	}
+
+	/** World-only color: main color attachment -> world IOSurface (same space as inColor). */
+	private void captureWorldColor(com.mojang.blaze3d.pipeline.RenderTarget main, int inW, int inH) {
+		try {
+			int colorGlId = textureGlId(main.getColorTexture());
+			gl.bindFboWithColor(gl.srcFbo(), colorGlId, GL_TEXTURE_2D, inW, inH);
+			gl.bindFboWithColor(gl.dstFbo(), inWorld.glTexture, GL_TEXTURE_RECTANGLE, scaledW, scaledH);
+			gl.blitColor(gl.srcFbo(), inW, inH, scaledW, scaledH);
+		} catch (Throwable t) {
+			LOGGER.warn("MMetal world color capture failed", t);
+		}
 	}
 
 	/** GPU-side depth pack: main depth attachment -> packed BGRA8 IOSurface. */
@@ -606,6 +629,9 @@ public final class MetalPipeline {
 					MetalNative.setTexture(encoder, hdrSource != null ? hdrSource : postFxTex, 0);
 					MetalNative.setTexture(encoder, hdrBloom != null ? hdrBloom : bloomTexA, 1);
 					MetalNative.setTexture(encoder, drawableTex, 2);
+					if (inWorld != null) {
+						MetalNative.setTexture(encoder, inWorld.metalTexture, 3);
+					}
 					MemorySegment params = writeEffectParams(0.0f);
 					params.set(java.lang.foreign.ValueLayout.JAVA_FLOAT, OFF_TONEMODE, 2.0f);
 					params.set(java.lang.foreign.ValueLayout.JAVA_FLOAT, OFF_HEADROOM, hdrPresenter.headroom());
@@ -618,6 +644,9 @@ public final class MetalPipeline {
 					// the frame at the configured strength.
 					params.set(java.lang.foreign.ValueLayout.JAVA_FLOAT, OFF_BLOOM,
 						hdrBloom != null ? (float) config.effects.bloomStrength : 0.0f);
+					// Keep GUI/HUD pixels at SDR appearance (world-only capture vs full frame).
+					params.set(java.lang.foreign.ValueLayout.JAVA_FLOAT, OFF_UI_MASK,
+						inWorld != null && worldCapturedThisFrame ? 1.0f : 0.0f);
 					MetalNative.setBytes(encoder, params, EFFECT_PARAMS_SIZE, 0);
 					MetalNative.dispatch(encoder, groupCount(fullW), groupCount(fullH), 8, 8);
 					MetalNative.endEncoder(encoder);
@@ -679,6 +708,7 @@ public final class MetalPipeline {
 		}
 		resetPending = false;
 		depthCapturedThisFrame = false;
+		worldCapturedThisFrame = false;
 	}
 
 	private void presentToWindow(long windowHandle, IosurfacePair source) {
@@ -1197,6 +1227,7 @@ public final class MetalPipeline {
 			case FILMIC, EXTENDED, NEUTRAL -> 0.0f;
 		};
 		buffer.set(java.lang.foreign.ValueLayout.JAVA_FLOAT, OFF_PALETTE, paletteGrade);
+		buffer.set(java.lang.foreign.ValueLayout.JAVA_FLOAT, OFF_UI_MASK, 0.0f);
 		buffer.set(java.lang.foreign.ValueLayout.JAVA_FLOAT, OFF_REFL_STRENGTH,
 			(float) (config.effects.enabled && config.effects.reflections
 				? config.effects.reflectionStrength : 0.0));
@@ -1462,6 +1493,8 @@ public final class MetalPipeline {
 
 		long ioUsage = MetalNative.USAGE_SHADER_READ | MetalNative.USAGE_SHADER_WRITE;
 		inColor = IosurfacePair.create(inW, inH, IosurfacePair.Kind.COLOR, ioUsage);
+		// World-only capture (pre-GUI); used by the HDR tonemap to keep the UI at SDR.
+		inWorld = IosurfacePair.create(inW, inH, IosurfacePair.Kind.COLOR, ioUsage);
 		// Depth shares the BGRA8 IOSurface combo (the only widely supported 4-byte one);
 		// mm_depth unpacks it into a native R32Float texture for the kernels/MetalFX.
 		inDepth = IosurfacePair.create(inW, inH, IosurfacePair.Kind.COLOR, ioUsage);
@@ -1558,10 +1591,12 @@ public final class MetalPipeline {
 		closeQuietly(inDepth);
 		closeQuietly(outColor);
 		closeQuietly(interpColor);
+		closeQuietly(inWorld);
 		inColor = null;
 		inDepth = null;
 		outColor = null;
 		interpColor = null;
+		inWorld = null;
 		destroyTexture(privateFullTex);
 		destroyTexture(postFxTex);
 		destroyTexture(prevColorTex);

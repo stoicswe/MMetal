@@ -47,13 +47,15 @@ struct EffectParams {
     float  styleId;            // mm_style: look id (see MMetalConfig.Style ordinal)
     float  hdrDarkness;        // HDR only: 0 = neutral, 1 = deepest shadow rendition
     float  palette;            // >0.5 = VIBRANT grade (saturation + micro-contrast)
+    float  uiMask;             // >0.5 = keep GUI/HUD pixels at SDR appearance (HDR)
 };
 // Java-side offsets: viewport@0, near@8, far@12, sunStrength@16, aoStrength@20,
 // steps@24, rayLength@28, sunDirEye@32, time@48, tanHalfFovY@52, aspect@56,
 // sunScreen@64, motionBlurAmount@80, exposure@84, tonemapMode@88, headroom@92,
 // reflectionStrength@96, giStrength@100, denoise@104, bloomStrength@108,
 // handGlow@112, handGlowPos@128, rtShadowMix@136, styleId@140, hdrDarkness@144,
-// palette@148, size 152.
+// palette@148, uiMask@152, size 156.
+// mm_style also reuses headroom@92 as the style strength.
 // mm_style also reuses headroom@92 as the style strength.
 
 // Per-frame camera parameters for motion vector generation.
@@ -242,6 +244,7 @@ kernel void mm_tonemap(
     texture2d<float, access::read>  inColor  [[texture(0)]],
     texture2d<float>                   bloom [[texture(1)]],
     texture2d<float, access::write> outColor [[texture(2)]],
+    texture2d<float, access::read> worldColor [[texture(3)]],
     constant EffectParams          &params   [[buffer(0)]],
     uint2 gid                                                [[thread_position_in_grid]])
 {
@@ -299,10 +302,24 @@ kernel void mm_tonemap(
         // highlights (the black-level half of the AAA HDR calibration pair).
         float shadowW = 1.0 - saturate(luma / 0.25);   // 1 near black, 0 by 25% grey
         lin *= 1.0 - params.hdrDarkness * shadowW * 0.8;
+        float3 hdrOut = lin * boost;
+        // GUI/HUD stays SDR: pixels the interface touched differ between the full frame
+        // and the world-only capture. Those keep the unboosted linear value (= SDR
+        // white) instead of being pushed into the EDR headroom. A menu's dimmed
+        // backdrop touches the whole screen, so menus read fully SDR.
+        if (params.uiMask > 0.5) {
+            float3 rawFull = inColor.read(gid).rgb;
+            float3 rawWorld = worldColor.read(gid).rgb;
+            float diff = max(max(abs(rawFull.r - rawWorld.r), abs(rawFull.g - rawWorld.g)),
+                             abs(rawFull.b - rawWorld.b));
+            if (diff > (2.0 / 255.0)) {
+                hdrOut = lin;
+            }
+        }
         // The pipeline's working textures are bottom-up (they are sampled by the GL
         // present quad without a v-flip); a CAMetalLayer drawable is top-down, so the
         // EDR write flips Y to present upright.
-        outColor.write(float4(lin * boost, 1.0),
+        outColor.write(float4(hdrOut, 1.0),
                        uint2(gid.x, (uint)params.viewport.y - 1u - gid.y));
     } else if (params.tonemapMode > 0.5) {
         // Linear-light filmic knee: midtones exact, highlights compressed.

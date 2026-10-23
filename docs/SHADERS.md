@@ -114,3 +114,40 @@ GLSL versions/extensions, SSBO/image/compute usage, and a GL-4.1 verdict:
 - **needs translation** — SSBOs / image load-store / GLSL above 4.1.
 
 The manifest is the input model for rung 2 (GLSL → SPIR-V → MSL translation).
+
+### Installed pack inventory (2026-10-23)
+
+| Pack | Programs | GLSL | GL 4.1 verdict |
+| --- | --- | --- | --- |
+| Insanity Universal 1.650 | 80 | 120 | runs as-is |
+| BSL 10.1.8 | 94 | 130 | runs, 3 compute passes skipped |
+| Solas 3.8 | 83 | 430 | runs, 3 compute passes skipped |
+| Complementary r5.9.3 | 111 | 400 | runs, 3 compute passes skipped |
+| photon 1.4 | 244 | 430 + image load/store + subgroup ops | needs translation (10 compute passes, images) |
+
+## 7. Ladder rung 2 — GLSL → SPIR-V → MSL (prototype working)
+
+`GlslTranslator` drives the MoltenVK toolchain (install with
+`brew install glslang spirv-cross`):
+
+```
+GLSL ──glslangValidator (-V --target-env vulkan1.1 --aml --amb -I…)
+     ──spirv-cross --msl
+     ──MetalNative.compileLibrary (runtime Metal compiler)
+```
+
+Verified end-to-end: a pack-style composite shader (texture sample + palette
+grade) translates to MSL and compiles on the Metal device. `MetalNative`'s
+`newLibraryWithSource:options:error:` binding was missing its third argument —
+runtime source compilation had never been exercised before.
+
+Rung 2b (next) — the normalizer currently handles `#version` bump + legacy
+`attribute`/`varying` + `/lib` include flattening; probing real pack programs
+(composite/deferred/final/shadow) surfaced the remaining blockers:
+
+1. Vulkan SPIR-V rejects the `compatibility` profile → rewrite legacy builtins
+   (`texture2D`, `gl_FragColor`, `gl_FragData`) to core GLSL 450 equivalents.
+2. "non-opaque uniforms outside a block" → wrap the pack/Iris uniform set into
+   an interface block (pre-expand includes in Java first so the whole unit is
+   visible, then normalize and hand one flattened source to glslang).
+3. A preprocessor edge case in `lib/common.glsl:716` (directive after a token).
