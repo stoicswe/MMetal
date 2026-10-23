@@ -45,12 +45,14 @@ struct EffectParams {
     float2 handGlowPos;        // screen position of the held light (uv)
     float  rtShadowMix;        // 0..1 blend in the hardware ray-traded shadow texture
     float  styleId;            // mm_style: look id (see MMetalConfig.Style ordinal)
+    float  hdrDarkness;        // HDR only: 0 = neutral, 1 = deepest shadow rendition
 };
 // Java-side offsets: viewport@0, near@8, far@12, sunStrength@16, aoStrength@20,
 // steps@24, rayLength@28, sunDirEye@32, time@48, tanHalfFovY@52, aspect@56,
 // sunScreen@64, motionBlurAmount@80, exposure@84, tonemapMode@88, headroom@92,
 // reflectionStrength@96, giStrength@100, denoise@104, bloomStrength@108,
-// handGlow@112, handGlowPos@128, rtShadowMix@136, styleId@140, size 144.
+// handGlow@112, handGlowPos@128, rtShadowMix@136, styleId@140, hdrDarkness@144,
+// size 148.
 // mm_style also reuses headroom@92 as the style strength.
 
 // Per-frame camera parameters for motion vector generation.
@@ -262,7 +264,15 @@ kernel void mm_tonemap(
         float3 lin = mmetalSrgbToLinear(saturate(c));
         float luma = dot(lin, float3(0.2126, 0.7152, 0.0722));
         float boost = 1.0 + params.headroom * pow(saturate((luma - 0.4) / 0.6), 2.0);
-        outColor.write(float4(lin * boost, 1.0), gid);
+        // Darkness slider: pull shadow luminance down without touching midtones or
+        // highlights (the black-level half of the AAA HDR calibration pair).
+        float shadowW = 1.0 - saturate(luma / 0.25);   // 1 near black, 0 by 25% grey
+        lin *= 1.0 - params.hdrDarkness * shadowW * 0.8;
+        // The pipeline's working textures are bottom-up (they are sampled by the GL
+        // present quad without a v-flip); a CAMetalLayer drawable is top-down, so the
+        // EDR write flips Y to present upright.
+        outColor.write(float4(lin * boost, 1.0),
+                       uint2(gid.x, (uint)params.viewport.y - 1u - gid.y));
     } else if (params.tonemapMode > 0.5) {
         // Linear-light filmic knee: midtones exact, highlights compressed.
         float3 lin = mmetalSrgbToLinear(saturate(c));

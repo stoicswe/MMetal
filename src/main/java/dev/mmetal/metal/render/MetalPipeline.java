@@ -92,7 +92,7 @@ public final class MetalPipeline {
 		OFF_MB_AMOUNT = 80, OFF_EXPOSURE = 84, OFF_TONEMODE = 88, OFF_HEADROOM = 92,
 		OFF_REFL_STRENGTH = 96, OFF_GI_STRENGTH = 100, OFF_DENOISE = 104, OFF_BLOOM = 108,
 		OFF_HAND_GLOW = 112, OFF_HAND_POS = 128, OFF_RT_MIX = 136, OFF_STYLE = 140,
-		EFFECT_PARAMS_SIZE = 144;
+		OFF_HDR_DARKNESS = 144, EFFECT_PARAMS_SIZE = 148;
 	// RtShadowParams layout (mm_rt_shadows).
 	private static final int RT_VIEWPORT = 0, RT_NEAR = 8, RT_FAR = 12, RT_VIEW_ROT_INV = 16,
 		RT_EYE = 80, RT_SUN_DIR = 96, RT_TANHALF = 112, RT_ASPECT = 116, RT_JITTER = 120,
@@ -174,6 +174,12 @@ public final class MetalPipeline {
 	private int pendingH = -1;
 	private int pendingStableFrames;
 	private long lastRebuildNanos;
+	// Sizes of the last successful resource build; MetalFX objects are size-bound, and a
+	// throttled rebuild can leave them stale for a few frames.
+	private int resInW = -1;
+	private int resInH = -1;
+	private int resOutW = -1;
+	private int resOutH = -1;
 
 	private MetalPipeline(MMetalConfig config) {
 		this.config = config;
@@ -329,6 +335,9 @@ public final class MetalPipeline {
 		if (!disabled) {
 			disabled = true;
 			currentScaleFactor = 1.0f;
+			// The EDR overlay covers the window; if the pipeline stops presenting while
+			// it is up, the visible image freezes even though the game runs underneath.
+			hdrPresenter.teardown();
 			LOGGER.error("MMetal disabled for this session after an error", t);
 		}
 	}
@@ -368,11 +377,17 @@ public final class MetalPipeline {
 	public static void onPresent(long windowHandle, org.spongepowered.asm.mixin.injection.callback.CallbackInfo ci) {
 		MetalPipeline p = instance;
 		if (p == null || p.disabled || !p.config.enabled) {
+			if (p != null) {
+				// Drop the EDR overlay whenever the pipeline stops presenting: a stale
+				// Metal layer would keep covering the GL window with a frozen frame.
+				p.hdrPresenter.teardown();
+			}
 			return;
 		}
 		try {
 			p.checkConfigReload();
 			if (!p.config.enabled) {
+				p.hdrPresenter.teardown();
 				return;
 			}
 			p.present(windowHandle, ci);
@@ -561,7 +576,7 @@ public final class MetalPipeline {
 			boolean needDepth = effects || fi || motionBlur || styleActive();
 			long tPipelineStart = System.nanoTime();
 			boolean haveInterp = encodeMetal(upscale, effects, fiDoublePresent, camOk, needDepth, motionBlur,
-				!uiOpen);
+				!uiOpen, packOwnsLook);
 			avgPipelineMs = avgPipelineMs * 0.85
 				+ (System.nanoTime() - tPipelineStart) / 1.0e6 * 0.15;
 
@@ -570,9 +585,13 @@ public final class MetalPipeline {
 			// ourselves. Missing this in any path causes a second SDL_GL_SwapWindow per
 			// frame, which alternates the double-buffered window and flickers.
 			ci.cancel();
-			if (config.hdrOutput && hdrPresenter.isReady()) {
+			// HDR is independent of the effects chain and of Iris (the pack's output is
+			// tonemapped into EDR the same way). initialize() is idempotent and must run
+			// before isReady() can ever become true.
+			boolean hdrReady = config.hdrOutput && hdrPresenter.initialize(windowHandle)
+				&& hdrPresenter.isReady();
+			if (hdrReady) {
 				// EDR path: tonemap straight into the Metal drawable, present it.
-				hdrPresenter.initialize(windowHandle);
 				MemorySegment drawableTex = hdrPresenter.acquireDrawable(fullW, fullH);
 				MetalStats.edrHeadroom = hdrPresenter.headroom();
 				if (drawableTex == null || drawableTex.address() == 0) {
@@ -589,6 +608,15 @@ public final class MetalPipeline {
 					MemorySegment params = writeEffectParams(0.0f);
 					params.set(java.lang.foreign.ValueLayout.JAVA_FLOAT, OFF_TONEMODE, 2.0f);
 					params.set(java.lang.foreign.ValueLayout.JAVA_FLOAT, OFF_HEADROOM, hdrPresenter.headroom());
+					params.set(java.lang.foreign.ValueLayout.JAVA_FLOAT, OFF_EXPOSURE,
+						(float) (config.effects.exposure * config.hdrBrightness));
+					params.set(java.lang.foreign.ValueLayout.JAVA_FLOAT, OFF_HDR_DARKNESS,
+						(float) config.hdrDarkness);
+					// Only add bloom when this frame actually produced a bloom texture -
+					// otherwise the stale one (e.g. from the loading screen) ghosts into
+					// the frame at the configured strength.
+					params.set(java.lang.foreign.ValueLayout.JAVA_FLOAT, OFF_BLOOM,
+						hdrBloom != null ? (float) config.effects.bloomStrength : 0.0f);
 					MetalNative.setBytes(encoder, params, EFFECT_PARAMS_SIZE, 0);
 					MetalNative.dispatch(encoder, groupCount(fullW), groupCount(fullH), 8, 8);
 					MetalNative.endEncoder(encoder);
@@ -596,6 +624,11 @@ public final class MetalPipeline {
 					hdrPresenter.presentDrawable();
 				}
 			} else {
+				if (!config.hdrOutput) {
+					// Toggling HDR off mid-session: drop the EDR overlay so the GL swap
+					// underneath becomes visible again.
+					hdrPresenter.teardown();
+				}
 				presentToWindow(windowHandle, haveInterp ? interpColor : outColor);
 				if (fiDoublePresent && haveInterp) {
 					// Interpolated frame first, then the real frame - correct temporal order.
@@ -683,7 +716,7 @@ public final class MetalPipeline {
 	// ------------------------------------------------------------------
 
 	private boolean encodeMetal(boolean upscale, boolean effects, boolean fi, boolean camOk, boolean needDepth,
-	                            boolean motionBlur, boolean depthValid) {
+	                            boolean motionBlur, boolean depthValid, boolean packOwnsLook) {
 		long tEncodeStart = System.nanoTime();
 		MemorySegment cmd = MetalNative.newCommandBuffer();
 		if (cmd == null || cmd.address() == 0) {
@@ -701,7 +734,15 @@ public final class MetalPipeline {
 		}
 
 		// 1) Upscale (or copy) into the full-res private working texture.
-		if (upscale) {
+		// MetalFX objects are bound to the sizes they were created with. During a
+		// throttled rebuild (rapid quality/scale switches, window churn) the current
+		// sizes can differ for a few frames, and the scaler may have been destroyed
+		// while the pipeline ran at native resolution - falling back to a plain copy
+		// keeps presenting instead of throwing from a null/mismatched scaler.
+		boolean sizesMatch = scaledW == resInW && scaledH == resInH
+			&& fullW == resOutW && fullH == resOutH;
+		boolean scaled = false;
+		if (upscale && sizesMatch) {
 			if (config.upscaleMode == MMetalConfig.UpscaleMode.TEMPORAL && temporalScaler != null) {
 				// Temporal upscaling consumes motion vectors - generate them first.
 				dispatchMotion(cmd, camOk);
@@ -709,11 +750,14 @@ public final class MetalPipeline {
 					0.0f, 0.0f, (float) scaledW / fullW, (float) scaledH / fullH, resetPending);
 				MetalFx.configureScaler(temporalScaler, inColor.metalTexture, privateFullTex, scaledW, scaledH);
 				MetalFx.encodeScaler(temporalScaler, cmd);
-			} else {
+				scaled = true;
+			} else if (spatialScaler != null) {
 				MetalFx.configureScaler(spatialScaler, inColor.metalTexture, privateFullTex, scaledW, scaledH);
 				MetalFx.encodeScaler(spatialScaler, cmd);
+				scaled = true;
 			}
-		} else {
+		}
+		if (!scaled) {
 			MetalNative.copyTexture(cmd, inColor.metalTexture, privateFullTex, fullW, fullH);
 		}
 
@@ -761,7 +805,10 @@ public final class MetalPipeline {
 		// 4) Motion vectors + MetalFX frame interpolation (pre-tonemap, consistent
 		//    encoding between the current and previous frames).
 		boolean haveInterp = false;
-		if (fi && camOk && frames.hasPrevious && frameInterpolator != null) {
+		boolean fiUsable = fi && camOk && frames.hasPrevious && frameInterpolator != null
+			&& sizesMatch && prevColorTex != null && depthR32Tex != null
+			&& motionTex != null && interpPrivateTex != null;
+		if (fiUsable) {
 			dispatchMotion(cmd, camOk);
 			MetalFx.configureInterpolator(frameInterpolator,
 				finalPre, prevColorTex, depthR32Tex, motionTex, interpPrivateTex,
@@ -786,7 +833,12 @@ public final class MetalPipeline {
 		hdrBloom = bloom;
 		if (!hdrActive) {
 			boolean style = styleActive() && styleTex != null;
-			if (config.effects.tonemap && tonemappedTex != null) {
+			// Under a shader pack (METALFX tier) the pack owns the display transform:
+			// its output is already graded, so MMetal's tonemap/bloom must not run on
+			// top of it. Besides double-grading, the bloom texture would still hold
+			// whatever last ran the bloom pass (the loading screen), smearing it into
+			// every later frame.
+			if (!packOwnsLook && config.effects.tonemap && tonemappedTex != null) {
 				dispatchTonemap(cmd, finalPre, bloom, tonemappedTex);
 				MemorySegment realOut = tonemappedTex;
 				if (style && dispatchLook(cmd, tonemappedTex, styleTex, depthValid)) {
@@ -1472,6 +1524,10 @@ public final class MetalPipeline {
 		LOGGER.info(String.format(Locale.ROOT,
 			"MMetal resources ready: %dx%d -> %dx%d (upscale=%s effects=%s fi=%s)",
 			inW, inH, fullW, fullH, upscale, effects, fi));
+		resInW = inW;
+		resInH = inH;
+		resOutW = fullW;
+		resOutH = fullH;
 		lastRebuildNanos = System.nanoTime();
 		MetalStats.renderWidth = inW;
 		MetalStats.renderHeight = inH;

@@ -50,10 +50,13 @@ public final class HdrPresenter {
 	private final Logger logger;
 	private MemorySegment metalLayer;
 	private MemorySegment contentLayer;
+	private MemorySegment window;
 	private long lastWidth = -1;
 	private long lastHeight = -1;
+	private float lastScale = 1.0f;
 	private float headroom = 1.0f;
 	private boolean ready;
+	private boolean failed;
 
 	public HdrPresenter(Logger logger) {
 		this.logger = logger;
@@ -76,20 +79,27 @@ public final class HdrPresenter {
 		if (ready) {
 			return true;
 		}
+		if (failed) {
+			return false;
+		}
 		try {
-			var sdl = java.lang.foreign.Linker.nativeLinker().defaultLookup();
 			var linker = java.lang.foreign.Linker.nativeLinker();
+			// LWJGL loads SDL with RTLD_LOCAL, so its symbols are not reachable through
+			// the FFM default lookup. Ask the LWJGL SDL binding for the loaded library,
+			// then take the two SDL3 entry points from it.
+			var sdl = org.lwjgl.sdl.SDL.getLibrary();
 			MethodHandle getWindowProperties = Layouts.fn(linker,
-				sdl.find("SDL_GetWindowProperties").orElseThrow(),
+				MemorySegment.ofAddress(sdl.getFunctionAddress("SDL_GetWindowProperties")),
 				FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.JAVA_LONG));
 			MethodHandle getPointerProperty = Layouts.fn(linker,
-				sdl.find("SDL_GetPointerProperty").orElseThrow(),
+				MemorySegment.ofAddress(sdl.getFunctionAddress("SDL_GetPointerProperty")),
 				FunctionDescriptor.of(POINTER, ValueLayout.JAVA_INT, POINTER, POINTER));
 			int props = (int) getWindowProperties.invoke(windowHandle);
 			MemorySegment nsWindow = (MemorySegment) getPointerProperty.invoke(
 				props, ObjC.cstr(SDL_PROP_WINDOW_COCOA_WINDOW), MemorySegment.NULL);
 			if (nsWindow == null || nsWindow.address() == 0) {
 				logger.warn("MMetal HDR: no Cocoa window handle from SDL");
+				failed = true;
 				return false;
 			}
 
@@ -97,6 +107,10 @@ public final class HdrPresenter {
 			// NSWindow -> contentView -> backing layer (AppKit + QuartzCore).
 			ObjC.framework(APPKIT_FRAMEWORK, "AppKit");
 			ObjC.framework(QUARTZCORE_FRAMEWORK, "QuartzCore");
+			// Keep the NSWindow so the display's EDR headroom can be queried from its
+			// NSScreen (that property lives on NSScreen, not on the layer, and returns
+			// CGFloat = double on arm64).
+			this.window = nsWindow;
 			MemorySegment contentView = objSend(POINTER, nsWindow, "contentView");
 			require(contentView, "contentView");
 			objSendVoid(contentView, "setWantsLayer:", (byte) 1);
@@ -116,9 +130,22 @@ public final class HdrPresenter {
 				FunctionDescriptor.of(POINTER, POINTER));
 			MemorySegment colorSpace = (MemorySegment) csCreate.invoke(name);
 			require(colorSpace, "CGColorSpaceCreateWithName");
-			objSendVoid(layer, "setColorSpace:", colorSpace);
-			objSendVoid(layer, "setWantsExtendedDynamicRangeContent:", (byte) 1);
-			objSendVoid(layer, "setFramebufferOnly:", (byte) 1);
+			// CAMetalLayer's property is `colorspace` (lowercase s). The EDR knobs also
+			// moved across macOS releases, so check before sending: an Objective-C
+			// "unrecognized selector" exception cannot be caught from Java and aborts
+			// the process. Anything missing degrades to the GL path instead.
+			if (!responds(layer, "setColorspace:")) {
+				logger.warn("MMetal HDR: CAMetalLayer has no setColorspace: - staying on the GL path");
+				failed = true;
+				return false;
+			}
+			objSendVoid(layer, "setColorspace:", colorSpace);
+			if (responds(layer, "setWantsExtendedDynamicRangeContent:")) {
+				objSendVoid(layer, "setWantsExtendedDynamicRangeContent:", (byte) 1);
+			}
+			if (responds(layer, "setFramebufferOnly:")) {
+				objSendVoid(layer, "setFramebufferOnly:", (byte) 1);
+			}
 			objSendVoid(contentLayer, "addSublayer:", layer);
 
 			metalLayer = layer;
@@ -129,6 +156,7 @@ public final class HdrPresenter {
 		} catch (Throwable t) {
 			logger.warn("MMetal HDR: EDR presentation unavailable - staying on the GL path", t);
 			ready = false;
+			failed = true; // do not retry every frame; teardown() re-arms it
 			return false;
 		}
 	}
@@ -144,18 +172,32 @@ public final class HdrPresenter {
 		}
 		try {
 			if (width != lastWidth || height != lastHeight) {
+				// The layer's frame lives in the parent view's POINTS space, while the
+				// drawable size is PIXELS: on a 2x Retina panel a pixel-sized frame is
+				// twice the view and only a quadrant is visible.
+				float scale = 1.0f;
+				try {
+					scale = (float) objSendCGFloat(window, "backingScaleFactor");
+				} catch (Throwable ignored) {
+					scale = 1.0f;
+				}
+				if (scale <= 0.0f) {
+					scale = 1.0f;
+				}
 				MemorySegment size = ARENA.allocate(CG_SIZE);
 				size.set(ValueLayout.JAVA_DOUBLE, 0, (double) width);
 				size.set(ValueLayout.JAVA_DOUBLE, 8, (double) height);
 				invoke(metalLayer, "setDrawableSize:", size, CG_SIZE);
+				objSendVoidCGFloat(metalLayer, "setContentsScale:", scale);
 				MemorySegment frame = ARENA.allocate(CG_RECT);
 				frame.set(ValueLayout.JAVA_DOUBLE, 0, 0.0);
 				frame.set(ValueLayout.JAVA_DOUBLE, 8, 0.0);
-				frame.set(ValueLayout.JAVA_DOUBLE, 16, (double) width);
-				frame.set(ValueLayout.JAVA_DOUBLE, 24, (double) height);
+				frame.set(ValueLayout.JAVA_DOUBLE, 16, width / scale);
+				frame.set(ValueLayout.JAVA_DOUBLE, 24, height / scale);
 				invoke(metalLayer, "setFrame:", frame, CG_RECT);
 				lastWidth = width;
 				lastHeight = height;
+				lastScale = scale;
 			}
 
 			// Keep the overlay the TOPMOST sublayer. AppKit/SDL can append or reorder
@@ -167,7 +209,18 @@ public final class HdrPresenter {
 				objSendVoid(contentLayer, "addSublayer:", metalLayer);
 			}
 
-			headroom = objSendFloat(metalLayer, "maximumExtendedDynamicRangeColorComponentValue");
+			headroom = 1.0f;
+			try {
+				MemorySegment screen = (window == null || window.address() == 0)
+					? MemorySegment.NULL : objSend(POINTER, window, "screen");
+				if (screen != null && screen.address() != 0
+						&& responds(screen, "maximumExtendedDynamicRangeColorComponentValue")) {
+					headroom = (float) objSendCGFloat(
+						screen, "maximumExtendedDynamicRangeColorComponentValue");
+				}
+			} catch (Throwable ignored) {
+				headroom = 1.0f;
+			}
 			if (headroom < 1.0f) {
 				headroom = 1.0f;
 			}
@@ -209,11 +262,42 @@ public final class HdrPresenter {
 		}
 	}
 
+	/**
+	 * Removes the EDR overlay so the GL content underneath presents again (HDR toggled
+	 * off mid-session). Idempotent; a later re-enable runs {@link #initialize} fresh.
+	 */
+	public void teardown() {
+		if (!ready || metalLayer == null || metalLayer.address() == 0) {
+			return;
+		}
+		try {
+			objSendVoid(metalLayer, "removeFromSuperlayer");
+			ready = false;
+			failed = false; // a later re-enable may retry initialization
+			lastDrawable = null;
+			logger.info("MMetal HDR: EDR overlay removed");
+		} catch (Throwable t) {
+			logger.warn("MMetal HDR teardown failed", t);
+		}
+	}
+
 	// ---- objc helpers -------------------------------------------------------
 
 	private static MemorySegment objSend(MemoryLayout ret, MemorySegment recv, String selector) {
 		return (MemorySegment) ObjCSend.invoke(
 			ObjC.send(FunctionDescriptor.of(ret, POINTER, POINTER)), recv, ObjC.sel(selector));
+	}
+
+	/** Safe feature probe: false when the receiver does not implement the selector. */
+	private static boolean responds(MemorySegment recv, String selector) {
+		try {
+			Object r = ObjCSend.invoke(
+				ObjC.send(FunctionDescriptor.of(BOOL, POINTER, POINTER, POINTER)),
+				recv, ObjC.sel("respondsToSelector:"), ObjC.sel(selector));
+			return r instanceof Byte b && b != 0;
+		} catch (Throwable t) {
+			return false;
+		}
 	}
 
 	private static MemorySegment objSend(MemorySegment recv, String selector) {
@@ -240,10 +324,23 @@ public final class HdrPresenter {
 			recv, ObjC.sel(selector), arg);
 	}
 
+	/** Sets a {@code CGFloat} (double on arm64) property - e.g. contentsScale. */
+	private static void objSendVoidCGFloat(MemorySegment recv, String selector, double arg) {
+		ObjCSend.invoke(ObjC.send(FunctionDescriptor.ofVoid(POINTER, POINTER, ValueLayout.JAVA_DOUBLE)),
+			recv, ObjC.sel(selector), arg);
+	}
+
 	private static float objSendFloat(MemorySegment recv, String selector) {
 		Object r = ObjCSend.invoke(ObjC.send(FunctionDescriptor.of(FLOAT, POINTER, POINTER)),
 			recv, ObjC.sel(selector));
 		return r instanceof Float f ? f : 1.0f;
+	}
+
+	/** Reads a {@code CGFloat} (double on arm64) - NSScreen's EDR headroom uses this. */
+	private static double objSendCGFloat(MemorySegment recv, String selector) {
+		Object r = ObjCSend.invoke(ObjC.send(FunctionDescriptor.of(ValueLayout.JAVA_DOUBLE, POINTER, POINTER)),
+			recv, ObjC.sel(selector));
+		return r instanceof Double d ? d : 1.0;
 	}
 
 	private static void invoke(MemorySegment recv, String selector, MemorySegment arg, MemoryLayout argLayout) {

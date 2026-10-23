@@ -132,6 +132,10 @@ public final class MMetalConfigScreen extends Screen {
 
 		section("Display");
 		toggle("HDR Output (EDR)", () -> config.hdrOutput, v -> config.hdrOutput = v);
+		slider("HDR Brightness", config.hdrBrightness, 0.5, 2.0,
+			v -> config.hdrBrightness = v, "x");
+		slider("HDR Shadows (darkness)", config.hdrDarkness, 0.0, 1.0,
+			v -> config.hdrDarkness = v, "");
 		toggle("Filmic Tonemap", () -> config.effects.tonemap, v -> config.effects.tonemap = v);
 		slider("Exposure", config.effects.exposure, 0.25, 3.0,
 			v -> config.effects.exposure = v, "x");

@@ -140,6 +140,10 @@ public final class MMetalConfig {
 
 	/** Experimental: present through a Metal CAMetalLayer with EDR (true HDR output). */
 	public boolean hdrOutput = false;
+	/** HDR paper-white gain: scene brightness multiplier in EDR output (1.0 = reference). */
+	public double hdrBrightness = 1.0;
+	/** HDR shadow rendition: 0 = neutral, 1 = deepest shadows (the "darkness" slider). */
+	public double hdrDarkness = 0.0;
 
 	/** Look preset id (see {@code dev.mmetal.api.MMetalStyles}); "none" disables it. */
 	public String styleId = "none";
