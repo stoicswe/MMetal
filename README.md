@@ -186,6 +186,13 @@ changed since the newest `nightly_*` tag. Each run publishes a new pre-release
 plugin; snapshots are never overwritten. Run it manually any time with
 **Actions → nightly → Run workflow**.
 
+## Contributing
+
+Contributions are welcome - bug reports, fixes, and new style plugins alike. Please read
+[`CONTRIBUTING.md`](CONTRIBUTING.md) for the workflow and coding style, and
+[`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md) for community expectations. Style plugin
+guidance lives in [`docs/STYLES.md`](docs/STYLES.md).
+
 ## Credits
 
 Architecture and quality targets were informed by [LoreanXavier/pt-pc](https://github.com/LoreanXavier/pt-pc) (native P.T. port): render-scale → hardware upscaler → post effects → display transform, with separate UI presentation and per-preset quality tiers.
