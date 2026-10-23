@@ -8,10 +8,10 @@
     "GlSurfaceMixin",
     "OptionsScreenMixin",
     "ScreenInvoker",
-    "WindowMixin",
     "MinecraftInvoker",
     "DebugScreenOverlayMixin",
-    "FirstPersonHandsAndItemsRendererMixin"
+    "FirstPersonHandsAndItemsRendererMixin",
+    "GuiRendererMixin"
   ],
   "injectors": {
     "defaultRequire": 1

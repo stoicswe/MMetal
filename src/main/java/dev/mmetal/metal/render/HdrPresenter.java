@@ -49,6 +49,7 @@ public final class HdrPresenter {
 
 	private final Logger logger;
 	private MemorySegment metalLayer;
+	private MemorySegment contentLayer;
 	private long lastWidth = -1;
 	private long lastHeight = -1;
 	private float headroom = 1.0f;
@@ -121,6 +122,7 @@ public final class HdrPresenter {
 			objSendVoid(contentLayer, "addSublayer:", layer);
 
 			metalLayer = layer;
+			this.contentLayer = contentLayer;
 			ready = true;
 			logger.info("MMetal HDR: EDR CAMetalLayer overlay installed (RGBA16Float, extended linear sRGB)");
 			return true;
@@ -154,6 +156,15 @@ public final class HdrPresenter {
 				invoke(metalLayer, "setFrame:", frame, CG_RECT);
 				lastWidth = width;
 				lastHeight = height;
+			}
+
+			// Keep the overlay the TOPMOST sublayer. AppKit/SDL can append or reorder
+			// the GL content's layer at any view update; if the GL layer ends up above
+			// ours, the window shows the GL front buffer - which never swaps while the
+			// overlay is active - i.e. a permanent black window.
+			if (contentLayer != null && contentLayer.address() != 0) {
+				objSendVoid(metalLayer, "removeFromSuperlayer");
+				objSendVoid(contentLayer, "addSublayer:", metalLayer);
 			}
 
 			headroom = objSendFloat(metalLayer, "maximumExtendedDynamicRangeColorComponentValue");

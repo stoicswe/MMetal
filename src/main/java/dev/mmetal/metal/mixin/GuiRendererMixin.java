@@ -18,8 +18,14 @@ public abstract class GuiRendererMixin {
 	@Redirect(method = "draw",
 		at = @At(value = "INVOKE",
 			target = "Lnet/minecraft/client/renderer/GameRenderer;mainRenderTarget()Lcom/mojang/blaze3d/pipeline/RenderTarget;"))
-	private RenderTarget mmetal$nativeUiTarget() {
+	private RenderTarget mmetal$nativeUiTarget(net.minecraft.client.renderer.GameRenderer gameRenderer) {
+		MetalPipeline.uiRedirectCalls++;
 		RenderTarget ui = MetalPipeline.nativeUiTarget();
-		return ui != null ? ui : MetalPipeline.vanillaMainTarget();
+		if (ui != null) {
+			MetalPipeline.uiRedirectUiHits++;
+			MetalPipeline.clearNativeUiIfPending();
+			return ui;
+		}
+		return gameRenderer.mainRenderTarget();
 	}
 }

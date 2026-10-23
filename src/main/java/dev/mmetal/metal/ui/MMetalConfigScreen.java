@@ -54,6 +54,7 @@ public final class MMetalConfigScreen extends Screen {
 		slider(col, y, row++, "Exposure", config.effects.exposure, 0.25, 3.0,
 			v -> config.effects.exposure = v, "x");
 		toggle(col, y, row++, "HDR Output (EDR)", () -> config.hdrOutput, v -> config.hdrOutput = v);
+		toggle(col, y, row++, "Native-Res UI", () -> config.nativeUi, v -> config.nativeUi = v);
 		toggle(col, y, row++, "Sun From World Time", () -> config.effects.sunFromWorldTime,
 			v -> config.effects.sunFromWorldTime = v);
 
