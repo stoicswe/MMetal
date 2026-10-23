@@ -72,7 +72,7 @@ public final class MetalNative {
 	private static final MethodHandle MH_NEW_TEXTURE_IOSURFACE = bakedArgs(POINTER,
 		"newTextureWithDescriptor:iosurface:plane:", POINTER, POINTER, NSUINTEGER);
 	private static final MethodHandle MH_NEW_LIBRARY = bakedArgs(POINTER,
-		"newLibraryWithSource:options:error:", POINTER, POINTER);
+		"newLibraryWithSource:options:error:", POINTER, POINTER, POINTER);
 	private static final MethodHandle MH_NEW_COMPUTE_PIPELINE = bakedArgs(POINTER,
 		"newComputePipelineStateWithFunction:error:", POINTER, POINTER);
 	private static final MethodHandle MH_DEVICE_NAME = baked(POINTER, "name");
