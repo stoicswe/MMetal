@@ -38,10 +38,17 @@ public final class MetalNative {
 	public static final long USAGE_SHADER_WRITE = 0x0002;
 	public static final long USAGE_RENDER_TARGET = 0x0004;
 
-	// ---- Storage modes (from Metal) ----
+	// ---- Storage modes (MTLStorageMode, for MTLTextureDescriptor) ----
 	public static final long STORAGE_MODE_SHARED = 0;
 	public static final long STORAGE_MODE_MANAGED = 1;
 	public static final long STORAGE_MODE_PRIVATE = 2;
+
+	// ---- MTLResourceOptions (for MTLBuffer allocation) ----
+	// newBufferWithBytes/Length:options: take MTLResourceOptions, not MTLStorageMode:
+	// the CPU cache mode occupies bits 0-1 and the storage mode bits 4-5, so a raw
+	// MTLStorageMode lands in the cache-mode field and Metal asserts "Invalid cacheMode".
+	public static final long RESOURCE_STORAGE_SHARED = 0;
+	public static final long RESOURCE_STORAGE_PRIVATE = 2L << 4;
 
 	// ---- MTLTextureType ----
 	public static final long TEXTURE_TYPE_2D = 2;
@@ -54,8 +61,8 @@ public final class MetalNative {
 	private static final MemorySegment SEL_ALLOC = ObjC.sel("alloc");
 	private static final MemorySegment SEL_INIT = ObjC.sel("init");
 
-	// Method handles. All ObjC handles are "baked": the selector is inserted at index 1,
-	// so handles have the shape (receiver, args...).
+	// Method handles. All ObjC handles are "baked": the selector is inserted into the
+	// receiver's parameter slot, so handles have the shape (receiver, args...).
 	private static final MethodHandle MH_STRING_UTF8 = baked(POINTER, "UTF8String");
 	private static final MethodHandle MH_LOCALIZED_DESCRIPTION = baked(POINTER, "localizedDescription");
 
@@ -245,15 +252,16 @@ public final class MetalNative {
 
 	/** Creates a shared-storage MTLBuffer from a native memory region. */
 	public static MemorySegment newBuffer(MemorySegment bytes, long length) {
-		MemorySegment buffer = (MemorySegment) invoke(MH_NEW_BUFFER, DEVICE, bytes, length, STORAGE_MODE_SHARED);
+		MemorySegment buffer = (MemorySegment) invoke(MH_NEW_BUFFER, DEVICE, bytes, length,
+			RESOURCE_STORAGE_SHARED);
 		require(buffer, "newBufferWithBytes:length:options:");
 		return buffer;
 	}
 
-	/** Creates an uninitialised shared MTLBuffer (used for scratch space). */
+	/** Creates an uninitialised MTLBuffer (used for private scratch space). */
 	public static MemorySegment newBuffer(long length) {
 		MemorySegment buffer = (MemorySegment) invoke(MH_NEW_BUFFER_LEN, DEVICE, length,
-			STORAGE_MODE_PRIVATE);
+			RESOURCE_STORAGE_PRIVATE);
 		require(buffer, "newBufferWithLength:options:");
 		return buffer;
 	}
@@ -269,7 +277,7 @@ public final class MetalNative {
 		MemorySegment accel = (MemorySegment) invoke(MH_NEW_AS, DEVICE, asSize);
 		require(accel, "newAccelerationStructureWithSize:");
 		MemorySegment scratch = (MemorySegment) invoke(MH_NEW_BUFFER_LEN, DEVICE, scratchSize,
-			STORAGE_MODE_PRIVATE);
+			RESOURCE_STORAGE_PRIVATE);
 		require(scratch, "scratch buffer");
 
 		MemorySegment cmd = newCommandBuffer();
@@ -466,56 +474,46 @@ public final class MetalNative {
 
 	/**
 	 * Bakes an {@code objc_msgSend} downcall into a handle shaped {@code (receiver, args...)}
-	 * by inserting the selector at index 1.
+	 * by inserting the selector into the receiver's parameter slot.
+	 *
+	 * <p>Struct results handed back through memory make the Linker prepend a
+	 * {@code SegmentAllocator} parameter, moving the receiver to index 1 and the selector
+	 * slot to index 2. Binding the selector at a fixed index once put a selector pointer
+	 * into {@code objc_msgSend}'s receiver register and SIGSEGV'd
+	 * {@code accelerationStructureSizesWithDescriptor:} (see RtShadowBvh), so the slot is
+	 * derived from the linked handle's parameter count.</p>
 	 */
-	private static MethodHandle baked(java.lang.foreign.MemoryLayout ret, String selector,
-	                                  java.lang.foreign.MemoryLayout... args) {
+	private static MethodHandle baked(FunctionDescriptor descriptor, String selector) {
 		try {
-			return MethodHandles.insertArguments(
-				ObjC.send(FunctionDescriptor.of(ret, prepend(POINTER, POINTER, args))),
-				1, ObjC.sel(selector));
+			MethodHandle handle = ObjC.send(descriptor);
+			int parameters = descriptor.argumentLayouts().size(); // receiver + selector + args
+			int index = handle.type().parameterCount() == parameters ? 1 : 2;
+			return MethodHandles.insertArguments(handle, index, ObjC.sel(selector));
 		} catch (Throwable t) {
 			throw new IllegalStateException("Failed to bind selector " + selector, t);
 		}
+	}
+
+	private static MethodHandle baked(java.lang.foreign.MemoryLayout ret, String selector,
+	                                  java.lang.foreign.MemoryLayout... args) {
+		return baked(FunctionDescriptor.of(ret, prepend(POINTER, POINTER, args)), selector);
 	}
 
 	private static MethodHandle bakedVoid(String selector) {
-		try {
-			return MethodHandles.insertArguments(
-				ObjC.send(FunctionDescriptor.ofVoid(POINTER, POINTER)), 1, ObjC.sel(selector));
-		} catch (Throwable t) {
-			throw new IllegalStateException("Failed to bind selector " + selector, t);
-		}
+		return baked(FunctionDescriptor.ofVoid(POINTER, POINTER), selector);
 	}
 
 	private static MethodHandle bakedVoid(java.lang.foreign.MemoryLayout arg, String selector) {
-		try {
-			return MethodHandles.insertArguments(
-				ObjC.send(FunctionDescriptor.ofVoid(POINTER, POINTER, arg)), 1, ObjC.sel(selector));
-		} catch (Throwable t) {
-			throw new IllegalStateException("Failed to bind selector " + selector, t);
-		}
+		return baked(FunctionDescriptor.ofVoid(POINTER, POINTER, arg), selector);
 	}
 
 	private static MethodHandle bakedVoidArgs(String selector, java.lang.foreign.MemoryLayout... args) {
-		try {
-			return MethodHandles.insertArguments(
-				ObjC.send(FunctionDescriptor.ofVoid(prepend(POINTER, POINTER, args))),
-				1, ObjC.sel(selector));
-		} catch (Throwable t) {
-			throw new IllegalStateException("Failed to bind selector " + selector, t);
-		}
+		return baked(FunctionDescriptor.ofVoid(prepend(POINTER, POINTER, args)), selector);
 	}
 
 	private static MethodHandle bakedArgs(java.lang.foreign.MemoryLayout ret, String selector,
 	                                      java.lang.foreign.MemoryLayout... args) {
-		try {
-			return MethodHandles.insertArguments(
-				ObjC.send(FunctionDescriptor.of(ret, prepend(POINTER, POINTER, args))),
-				1, ObjC.sel(selector));
-		} catch (Throwable t) {
-			throw new IllegalStateException("Failed to bind selector " + selector, t);
-		}
+		return baked(FunctionDescriptor.of(ret, prepend(POINTER, POINTER, args)), selector);
 	}
 
 	private static java.lang.foreign.MemoryLayout[] prepend(java.lang.foreign.MemoryLayout first,

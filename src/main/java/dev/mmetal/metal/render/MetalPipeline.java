@@ -167,6 +167,9 @@ public final class MetalPipeline {
 	private long lastFrameNanos;
 	private float deltaTime = 1.0f / 60.0f;
 	private boolean resetPending = true;
+	private boolean lastEffectsActive;
+	private boolean lastPackOwnsLook;
+	private long lastPresentStartNanos;
 	private int pendingW = -1;
 	private int pendingH = -1;
 	private int pendingStableFrames;
@@ -310,6 +313,15 @@ public final class MetalPipeline {
 		if (p == null || p.disabled || !p.config.enabled || !p.bootstrapped) {
 			return 1.0f;
 		}
+		// While an Iris shader pack renders and MMetal is configured to STAND_DOWN, the
+		// scale must be released, or the game keeps rendering into the scaled target and
+		// vanilla's 1:1 blit fills only part of the window (stale borders). In the
+		// METALFX/FULL modes the scale stays: the pack renders at reduced resolution
+		// and MMetal upscales its output.
+		if (dev.mmetal.metal.hook.Compat.irisShadersActive()
+				&& p.config.irisMode == MMetalConfig.IrisMode.STAND_DOWN) {
+			return 1.0f;
+		}
 		return p.currentScaleFactor;
 	}
 
@@ -337,6 +349,7 @@ public final class MetalPipeline {
 					config.qualityPreset = reloaded.qualityPreset;
 					config.renderScale = reloaded.renderScale;
 					config.upscaleMode = reloaded.upscaleMode;
+					config.irisMode = reloaded.irisMode;
 					config.frameInterpolation = reloaded.frameInterpolation;
 					config.hdrOutput = reloaded.hdrOutput;
 					config.effects = reloaded.effects;
@@ -392,9 +405,17 @@ public final class MetalPipeline {
 		if (mc == null || mc.gameRenderer == null) {
 			return;
 		}
-		if (dev.mmetal.metal.hook.Compat.irisShadersActive()) {
-			return; // passthrough while a shader pack is rendering
+		// Tiered behaviour while an Iris shader pack renders (config.irisMode):
+		//  STAND_DOWN - vanilla presents the pack's frame untouched.
+		//  METALFX    - the pipeline keeps running over the pack's output, but the pack
+		//               owns the look, so only present-time features run (MetalFX
+		//               upscale + frame interpolation, no MMetal lighting on top).
+		//  FULL       - the whole pipeline (MMetal lighting effects included) runs.
+		boolean irisActive = dev.mmetal.metal.hook.Compat.irisShadersActive();
+		if (irisActive && config.irisMode == MMetalConfig.IrisMode.STAND_DOWN) {
+			return;
 		}
+		boolean packOwnsLook = irisActive && config.irisMode == MMetalConfig.IrisMode.METALFX;
 
 		RenderTarget main = mc.gameRenderer.mainRenderTarget();
 		if (main == null || main.width <= 0 || main.height <= 0) {
@@ -417,9 +438,9 @@ public final class MetalPipeline {
 		float scale = clampScale((float) config.scale());
 		currentScaleFactor = scale;
 		boolean upscale = scale < 0.999f && config.upscaleMode != MMetalConfig.UpscaleMode.OFF;
-		boolean effects = config.effects.enabled;
+		boolean effects = config.effects.enabled && !packOwnsLook;
 		boolean fi = config.frameInterpolation && SystemInfo.supportsFrameInterpolation();
-		boolean motionBlur = config.effects.enabled && config.effects.motionBlur;
+		boolean motionBlur = effects && config.effects.motionBlur;
 
 		// Frame interpolation and temporal upscaling must never blend across a UI
 		// state change (pause menu opening/closing, etc.) - reset history and
@@ -430,6 +451,19 @@ public final class MetalPipeline {
 			uiWasOpen = uiOpen;
 			resetPending = true;
 		}
+		// A pipeline-mode boundary (a shader pack activating/deactivating switches the
+		// frame source and toggles the lighting chain) or a long gap between presents
+		// (the loading screen stalls frames) means the stored history belongs to a
+		// completely different image - carrying it over ghosts the old frame into the
+		// new one (e.g. the MOJANG splash bleeding into the title screen).
+		if (effects != lastEffectsActive || packOwnsLook != lastPackOwnsLook
+				|| (lastPresentStartNanos != 0
+					&& tPresentStart - lastPresentStartNanos > 250_000_000L)) {
+			resetPending = true;
+		}
+		lastEffectsActive = effects;
+		lastPackOwnsLook = packOwnsLook;
+		lastPresentStartNanos = tPresentStart;
 		boolean frameGenSafe = fi && !uiOpen;
 
 		// Frame generation only helps when the game cannot reach the display refresh

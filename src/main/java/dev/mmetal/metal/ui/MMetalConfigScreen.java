@@ -126,6 +126,7 @@ public final class MMetalConfigScreen extends Screen {
 		toggle("MMetal", () -> config.enabled, v -> config.enabled = v);
 		qualityButton();
 		upscaleButton();
+		irisButton();
 		toggle("Frame Interpolation", () -> config.frameInterpolation,
 			v -> config.frameInterpolation = v);
 
@@ -359,6 +360,29 @@ public final class MMetalConfigScreen extends Screen {
 			b.setMessage(Component.literal("Upscale: " + config.upscaleMode));
 			MetalPipeline.onConfigMutated();
 		}).bounds(rowX(), y, rowW(), BH).build());
+	}
+
+	/** Cycles the behaviour while an Iris shader pack renders (see MMetalConfig.IrisMode). */
+	private void irisButton() {
+		int y = nextRow();
+		if (y < 0) {
+			return;
+		}
+		addRenderableWidget(Button.builder(irisLabel(), b -> {
+			MMetalConfig.IrisMode[] modes = MMetalConfig.IrisMode.values();
+			config.irisMode = modes[(config.irisMode.ordinal() + 1) % modes.length];
+			b.setMessage(irisLabel());
+			MetalPipeline.onConfigMutated();
+		}).bounds(rowX(), y, rowW(), BH).build());
+	}
+
+	private Component irisLabel() {
+		String detail = switch (config.irisMode) {
+			case STAND_DOWN -> "vanilla passthrough";
+			case METALFX -> "MetalFX + framegen";
+			case FULL -> "full pipeline";
+		};
+		return Component.literal("With Shaders: " + detail);
 	}
 
 	private void rayCountButton() {

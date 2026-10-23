@@ -22,6 +22,19 @@ public final class MMetalConfig {
 	}
 
 	/**
+	 * What MMetal does while an Iris shader pack is actively rendering. The pack owns
+	 * the look of the world; MMetal's present-time features still compose on top of it.
+	 */
+	public enum IrisMode {
+		/** Passthrough: vanilla presents the pack's frame untouched (legacy behaviour). */
+		STAND_DOWN,
+		/** The pack owns the look; MMetal adds MetalFX upscale + frame interpolation. */
+		METALFX,
+		/** The full pipeline (MMetal lighting effects included) runs under the pack too. */
+		FULL
+	}
+
+	/**
 	 * Render-resolution presets, matching the standard upscaler quality ladder
 	 * (linear scale factors like DLSS/FSR/XeSS).
 	 */
@@ -69,6 +82,9 @@ public final class MMetalConfig {
 	public double renderScale = 0.75;
 
 	public UpscaleMode upscaleMode = UpscaleMode.SPATIAL;
+
+	/** Behaviour while an Iris shader pack is actively rendering (see {@link IrisMode}). */
+	public IrisMode irisMode = IrisMode.METALFX;
 
 	/** MetalFX Frame Interpolation (macOS 26+). Set the game's Max FPS to half your refresh rate. */
 	public boolean frameInterpolation = false;
@@ -160,6 +176,9 @@ public final class MMetalConfig {
 		if (upscaleMode == null) {
 			upscaleMode = UpscaleMode.SPATIAL;
 		}
+		if (irisMode == null) {
+			irisMode = IrisMode.METALFX;
+		}
 		if (styleId == null || styleId.isBlank()) {
 			styleId = "none";
 		} else {
@@ -185,7 +204,7 @@ public final class MMetalConfig {
 
 	public String summary() {
 		return String.format(Locale.ROOT,
-			"enabled=%s quality=%s upscale=%s frameInterpolation=%s effects=%s style=%s",
-			enabled, qualityPreset, upscaleMode, frameInterpolation, effects.enabled, styleId);
+			"enabled=%s quality=%s upscale=%s iris=%s frameInterpolation=%s effects=%s style=%s",
+			enabled, qualityPreset, upscaleMode, irisMode, frameInterpolation, effects.enabled, styleId);
 	}
 }

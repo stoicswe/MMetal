@@ -67,6 +67,22 @@ public final class MMetalCommands {
 							}
 							return 1;
 						})))
+				.then(ClientCommands.literal("iris").then(
+					ClientCommands.argument("mode", StringArgumentType.word())
+						.executes(ctx -> {
+							try {
+								MMetalConfig config = MetalPipeline.config();
+								config.irisMode = MMetalConfig.IrisMode.valueOf(
+									StringArgumentType.getString(ctx, "mode").toUpperCase(Locale.ROOT));
+								MetalPipeline.onConfigMutated();
+								feedback("irisMode = " + config.irisMode
+									+ " (STAND_DOWN = vanilla passthrough, METALFX = upscale + framegen,"
+									+ " FULL = full pipeline under the pack)");
+							} catch (IllegalArgumentException e) {
+								feedback("Unknown mode - use STAND_DOWN, METALFX or FULL");
+							}
+							return 1;
+						})))
 				.then(ClientCommands.literal("framegen").then(
 					ClientCommands.argument("on", BoolArgumentType.bool()).executes(ctx -> {
 						MMetalConfig config = MetalPipeline.config();
@@ -124,6 +140,7 @@ public final class MMetalCommands {
 		config.qualityPreset = reloaded.qualityPreset;
 		config.renderScale = reloaded.renderScale;
 		config.upscaleMode = reloaded.upscaleMode;
+		config.irisMode = reloaded.irisMode;
 		config.frameInterpolation = reloaded.frameInterpolation;
 		config.effects = reloaded.effects;
 		MetalPipeline.onConfigMutated();
