@@ -89,7 +89,8 @@ public final class MetalPipeline {
 		OFF_TIME = 48, OFF_TANHALF = 52, OFF_ASPECT = 56, OFF_SUN_SCREEN = 64,
 		OFF_MB_AMOUNT = 80, OFF_EXPOSURE = 84, OFF_TONEMODE = 88, OFF_HEADROOM = 92,
 		OFF_REFL_STRENGTH = 96, OFF_GI_STRENGTH = 100, OFF_DENOISE = 104, OFF_BLOOM = 108,
-		OFF_HAND_GLOW = 112, OFF_HAND_POS = 128, OFF_RT_MIX = 136, EFFECT_PARAMS_SIZE = 144;
+		OFF_HAND_GLOW = 112, OFF_HAND_POS = 128, OFF_RT_MIX = 136, OFF_STYLE = 140,
+		EFFECT_PARAMS_SIZE = 144;
 	// RtShadowParams layout (mm_rt_shadows).
 	private static final int RT_VIEWPORT = 0, RT_NEAR = 8, RT_FAR = 12, RT_VIEW_ROT_INV = 16,
 		RT_EYE = 80, RT_SUN_DIR = 96, RT_TANHALF = 112, RT_ASPECT = 116, RT_JITTER = 120,
@@ -143,6 +144,7 @@ public final class MetalPipeline {
 	private MemorySegment volumetricTex;
 	private MemorySegment blurredTex;
 	private MemorySegment tonemappedTex;
+	private MemorySegment styleTex;
 	private MemorySegment interpOutTex;
 	private MemorySegment reflectionTex;
 	private MemorySegment giTex;
@@ -448,7 +450,7 @@ public final class MetalPipeline {
 				deltaTime = (float) Math.min((now - lastFrameNanos) / 1.0e9, 0.25);
 			}
 			lastFrameNanos = now;
-			boolean needDepth = effects || fi || motionBlur;
+			boolean needDepth = effects || fi || motionBlur || styleActive();
 			long tPipelineStart = System.nanoTime();
 			boolean haveInterp = encodeMetal(upscale, effects, fiDoublePresent, camOk, needDepth, motionBlur);
 			avgPipelineMs = avgPipelineMs * 0.85
@@ -673,17 +675,38 @@ public final class MetalPipeline {
 		hdrSource = finalPre;
 		hdrBloom = bloom;
 		if (!hdrActive) {
+			boolean style = styleActive() && styleTex != null;
 			if (config.effects.tonemap && tonemappedTex != null) {
 				dispatchTonemap(cmd, finalPre, bloom, tonemappedTex);
-				MetalNative.copyTexture(cmd, tonemappedTex, outColor.metalTexture, fullW, fullH);
+				MemorySegment realOut = tonemappedTex;
+				if (style) {
+					dispatchStyle(cmd, tonemappedTex, styleTex);
+					realOut = styleTex;
+				}
+				MetalNative.copyTexture(cmd, realOut, outColor.metalTexture, fullW, fullH);
 				if (haveInterp) {
 					dispatchTonemap(cmd, interpPrivateTex, bloom, interpOutTex);
-					MetalNative.copyTexture(cmd, interpOutTex, interpColor.metalTexture, fullW, fullH);
+					MemorySegment interpOut = interpOutTex;
+					if (style) {
+						dispatchStyle(cmd, interpOutTex, styleTex);
+						interpOut = styleTex;
+					}
+					MetalNative.copyTexture(cmd, interpOut, interpColor.metalTexture, fullW, fullH);
 				}
 			} else {
-				MetalNative.copyTexture(cmd, finalPre, outColor.metalTexture, fullW, fullH);
+				MemorySegment realOut = finalPre;
+				if (style) {
+					dispatchStyle(cmd, finalPre, styleTex);
+					realOut = styleTex;
+				}
+				MetalNative.copyTexture(cmd, realOut, outColor.metalTexture, fullW, fullH);
 				if (haveInterp) {
-					MetalNative.copyTexture(cmd, interpPrivateTex, interpColor.metalTexture, fullW, fullH);
+					MemorySegment interpOut = interpPrivateTex;
+					if (style) {
+						dispatchStyle(cmd, interpPrivateTex, styleTex);
+						interpOut = styleTex;
+					}
+					MetalNative.copyTexture(cmd, interpOut, interpColor.metalTexture, fullW, fullH);
 				}
 			}
 		}
@@ -803,6 +826,33 @@ public final class MetalPipeline {
 		MetalNative.setTexture(encoder, bloom != null ? bloom : bloomTexA, 1); // sample view
 		MetalNative.setTexture(encoder, destination, 2);
 		MemorySegment params = writeEffectParams(0.0f);
+		MetalNative.setBytes(encoder, params, EFFECT_PARAMS_SIZE, 0);
+		MetalNative.dispatch(encoder, groupCount(fullW), groupCount(fullH), 8, 8);
+		MetalNative.endEncoder(encoder);
+	}
+
+	/** True when a look preset other than NONE is selected with a non-zero strength. */
+	private boolean styleActive() {
+		return config.style != null && config.style != MMetalConfig.Style.NONE
+			&& config.styleStrength > 0.01;
+	}
+
+	/**
+	 * Applies the selected look to an LDR image after the display transform.
+	 * {@code headroom} carries the style strength (see mm_style in the .metal file).
+	 */
+	private void dispatchStyle(MemorySegment cmd, MemorySegment source, MemorySegment destination) {
+		MemorySegment encoder = MetalNative.computeEncoder(cmd);
+		MetalNative.setComputePipeline(encoder, library.stylePipeline());
+		MetalNative.setTexture(encoder, source, 0);
+		MetalNative.setTexture(encoder, depthR32Tex != null ? depthR32Tex : source, 1);
+		MetalNative.setTexture(encoder, destination, 2);
+		MetalNative.setTexture(encoder, bloomTexA, 3); // sample view - Legends glow
+		MemorySegment params = writeEffectParams(0.0f);
+		params.set(java.lang.foreign.ValueLayout.JAVA_FLOAT, OFF_STYLE,
+			config.style == null ? 0.0f : (float) config.style.ordinal());
+		params.set(java.lang.foreign.ValueLayout.JAVA_FLOAT, OFF_HEADROOM,
+			(float) Math.max(0.0, Math.min(1.0, config.styleStrength)));
 		MetalNative.setBytes(encoder, params, EFFECT_PARAMS_SIZE, 0);
 		MetalNative.dispatch(encoder, groupCount(fullW), groupCount(fullH), 8, 8);
 		MetalNative.endEncoder(encoder);
@@ -1223,6 +1273,8 @@ public final class MetalPipeline {
 			MetalNative.STORAGE_MODE_PRIVATE);
 		tonemappedTex = MetalNative.newTexture(fullW, fullH, MetalNative.PIXEL_FORMAT_BGRA8_UNORM, rwUsage,
 			MetalNative.STORAGE_MODE_PRIVATE);
+		styleTex = MetalNative.newTexture(fullW, fullH, MetalNative.PIXEL_FORMAT_BGRA8_UNORM, rwUsage,
+			MetalNative.STORAGE_MODE_PRIVATE);
 		interpOutTex = MetalNative.newTexture(fullW, fullH, MetalNative.PIXEL_FORMAT_BGRA8_UNORM, rwUsage,
 			MetalNative.STORAGE_MODE_PRIVATE);
 		reflectionTex = MetalNative.newTexture(fullW, fullH, MetalNative.PIXEL_FORMAT_BGRA8_UNORM, rwUsage,
@@ -1301,6 +1353,7 @@ public final class MetalPipeline {
 		destroyTexture(volumetricTex);
 		destroyTexture(blurredTex);
 		destroyTexture(tonemappedTex);
+		destroyTexture(styleTex);
 		destroyTexture(interpOutTex);
 		destroyTexture(reflectionTex);
 		destroyTexture(giTex);
@@ -1327,6 +1380,7 @@ public final class MetalPipeline {
 		worldLightTex = null;
 		motionTex = null;
 		interpPrivateTex = null;
+		styleTex = null;
 		spatialScaler = null;
 		temporalScaler = null;
 		frameInterpolator = null;

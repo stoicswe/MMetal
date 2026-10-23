@@ -32,7 +32,7 @@ public final class MMetalConfigScreen extends Screen {
 	private static final int BH = 18;
 	private static final int TAB_GAP = 4;
 
-	private static final String[] TABS = {"Render", "Ray Tracing", "Effects", "Held Light"};
+	private static final String[] TABS = {"Render", "Ray Tracing", "Effects", "Held Light", "Style"};
 
 	private final MMetalConfig config = MetalPipeline.config();
 
@@ -114,7 +114,8 @@ public final class MMetalConfigScreen extends Screen {
 			case 0 -> buildRender();
 			case 1 -> buildRayTracing();
 			case 2 -> buildEffects();
-			default -> buildHeldLight();
+			case 3 -> buildHeldLight();
+			default -> buildStyle();
 		}
 	}
 
@@ -200,6 +201,55 @@ public final class MMetalConfigScreen extends Screen {
 			v -> config.effects.heldLightParticles = v);
 		slider("Flame Height", config.effects.flameTipHeight, 0.0, 0.8,
 			v -> config.effects.flameTipHeight = v, "m");
+	}
+
+	private void buildStyle() {
+		section("Look");
+		styleButton();
+		slider("Style Strength", config.styleStrength, 0.0, 1.0,
+			v -> config.styleStrength = v, "%");
+
+		section("About");
+		int y = nextRow();
+		if (y >= 0) {
+			Button about = Button.builder(
+					Component.literal(currentStyleDescription()), b -> {
+					})
+				.bounds(rowX(), y, rowW(), BH).build();
+			about.active = false;
+			addRenderableWidget(about);
+		}
+	}
+
+	private String currentStyleDescription() {
+		MMetalConfig.Style style = config.style;
+		if (style == null) {
+			return "";
+		}
+		String text = style.description;
+		// Keep the disabled button's label readable in the narrow row.
+		return text.length() > 58 ? text.substring(0, 55) + "..." : text;
+	}
+
+	private void styleButton() {
+		int y = nextRow();
+		if (y < 0) {
+			return;
+		}
+		addRenderableWidget(Button.builder(styleLabel(), b -> {
+			MMetalConfig.Style[] styles = MMetalConfig.Style.values();
+			int next = ((config.style == null ? 0 : config.style.ordinal()) + 1) % styles.length;
+			config.style = styles[next];
+			b.setMessage(styleLabel());
+			MetalPipeline.onConfigMutated();
+			rebuildWidgets();
+		}).bounds(rowX(), y, rowW(), BH).build());
+	}
+
+	private Component styleLabel() {
+		MMetalConfig.Style style = config.style == null ? MMetalConfig.Style.NONE : config.style;
+		String suffix = style.implemented() ? "" : " (soon)";
+		return Component.literal("Style: " + style.label + suffix);
 	}
 
 	// ---------------------------------------------------------------- rows
@@ -352,6 +402,8 @@ public final class MMetalConfigScreen extends Screen {
 		config.upscaleMode = MMetalConfig.UpscaleMode.SPATIAL;
 		config.frameInterpolation = false;
 		config.hdrOutput = false;
+		config.style = MMetalConfig.Style.NONE;
+		config.styleStrength = 1.0;
 		config.effects = new MMetalConfig.Effects();
 		MetalPipeline.onConfigMutated();
 	}

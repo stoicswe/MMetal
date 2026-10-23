@@ -139,7 +139,7 @@ Minecraft 26.3 renders through Mojang's **RenderPearl** abstraction with the **O
 
 ```
 Game (GL, RenderPearl) ──render──▶ main render target (reduced resolution)
-        │                          ▲ render target size scaled in GameRenderer.extractWindow()
+        │                          ▲ resize reads scaled in GameRenderer.render()
         ▼ GlSurface.present() mixin
 IOSurface capture (GL blit + packed depth)      ← zero-copy GL↔Metal
         ▼
@@ -149,19 +149,28 @@ IOSurface → GL quad → SDL swap (×2 when interpolating)   [or EDR CAMetalLay
 ```
 
 Coordinate-space invariants (important — these caused real bugs):
-- `Window.getWidth()/getHeight()` stay **native** (mouse maps pixels → GUI using this size).
-- `Window.getGuiScaledWidth()/Height()` scale with the render scale (GUI layout matches the target).
-- `WindowRenderState.width/height` scale (feeds the main target resize and the GUI scissor clamp).
+- The whole frame (world **and** GUI/HUD) renders at the reduced resolution into one
+  target and is upscaled as a single image - the engine's intended model.
+- `Window.getWidth()/getHeight()` and `getGuiScaledWidth/Height()` stay **native**:
+  widget layout, the GUI ortho projection (`WindowRenderState.width / guiScale`), scissor
+  math and mouse mapping all live in vanilla coordinates.
+- The render scale is applied **only** to the `WindowRenderState.width/height` reads in
+  `GameRenderer.render()` (the size comparison and the `resize(w,h)` call). The state
+  itself stays native so the GUI projection is untouched.
+- GUI scissor rects are computed in native pixels and scaled to the target
+  (`GuiRendererMixin`) - RenderPearl rejects out-of-bounds scissors.
 - The swapchain is always the **real window size** (`GlSurface.blitFromTexture` presents with it).
 
 Full details — FFI layer, IOSurface sync rules, kernels, failure policy — in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ## Known limitations (v0.1.0)
 
-- **GUI renders at the scaled resolution** (soft text at aggressive tiers). A native-resolution UI pass is the next planned step.
+- **GUI renders at the scaled resolution** together with the world (soft text at aggressive tiers). A native-resolution UI pass was prototyped and removed: the vanilla GUI bakes fullscreen layer rectangles from the framebuffer size, so rendering it into a differently-sized target shifts its background layers.
 - **Frame Interpolation is experimental** — camera-only motion vectors (exact for world motion, approximate for entities); one extra frame of latency; paused while menus are open.
 - **Temporal upscaling is experimental** — history resets on UI state changes; some ghosting on fast entity motion. `SPATIAL` is the recommended default.
-- **Hardware ray tracing** of the voxel world (Metal 4 BVH acceleration structures) is future work; current lighting effects are screen-space ray marching.
+- **Screen-space ray marching** drives AO, reflections and GI; hardware RT shadows use a
+  per-frame block BVH (Metal 4 acceleration structures) and are best-effort (quality
+  tiers, incremental rebuild is future work).
 - **HDR output is experimental** and needs an EDR display.
 - The frame is CPU/GPU-synchronised at present (`glFinish` + `waitUntilCompleted`); a shared-event fence path is planned to remove the small stall.
 - If anything fails, MMetal disables itself for the session with a clear log message — it never takes the game down.

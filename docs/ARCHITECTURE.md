@@ -25,8 +25,8 @@ Minecraft.renderFrame(boolean)
   ├─ configure GpuSurface from Window.queryFramebufferSize()   (real window size)
   ├─ acquireNextTexture()
   ├─ GameRenderer.render()
-  │    ├─ extractWindow() → WindowRenderState {width,height,guiScale}
-  │    ├─ resize mainRenderTarget if WindowRenderState differs
+  │    ├─ extractWindow() → WindowRenderState {width,height,guiScale}  (stays native)
+  │    ├─ resize mainRenderTarget (reads scaled by GameRendererMixin)
   │    ├─ renderLevel()            → world into mainRenderTarget (RGBA8 + D32)
   │    └─ GuiRenderer.render()     → GUI into the SAME mainRenderTarget
   ├─ windowSurface.blitFromTexture(encoder, colorView)  → GL blit to the default FB
@@ -37,8 +37,8 @@ Minecraft.renderFrame(boolean)
 
 | Mixin | Target | Purpose |
 | --- | --- | --- |
-| `GameRendererMixin` | `GameRenderer.extractWindow()` TAIL | Scales `WindowRenderState.width/height` → reduced main render target. **The only place the render scale is applied.** |
-| `WindowMixin` | `Window.getGuiScaledWidth/Height()` | Scales the GUI coordinate space with the render scale. |
+| `GameRendererMixin` | `GameRenderer.render()` field redirects | Returns scaled values for the two `WindowRenderState.width/height` reads (size comparison + `resize(w,h)`). **The only place the render scale is applied.** The state itself stays native. |
+| `GuiRendererMixin` | `GuiRenderer.enableScissor()` | Scales the native-pixel scissor rect into the reduced render target. |
 | `GlSurfaceMixin` | `GlSurface.present()` HEAD (cancellable) | Takes over presentation: capture → Metal → draw → swap. |
 | `OptionsScreenMixin` | `OptionsScreen.init()` TAIL | Adds the "MMetal Settings" button. |
 | `ScreenInvoker` | `Screen` | Exposes protected widget registration. |
@@ -49,12 +49,19 @@ Minecraft.renderFrame(boolean)
 - `Window.getWidth()/getHeight()` stay **native**. The mouse handler maps
   `pixel * guiScaledWidth / getWidth()`, so scaling the framebuffer size shifts every
   click.
-- `getGuiScaledWidth/Height()` scale with the render scale, so widget layout matches
-  the smaller render target.
-- `WindowRenderState.width/height` scale: they feed the render-target resize **and**
-  the GUI scissor clamp (`GuiRenderer.enableScissor` computes `coord * guiScale`,
-  clamped to these values — inconsistent sizes produce zero-height scissor rects and
-  a hard crash).
+- `getGuiScaledWidth/Height()` stay **native**. The GUI ortho projection is built as
+  `WindowRenderState.width / guiScale` inside `GuiRenderer.draw()`, so scaling either
+  of them alone (without the other) shifts and rescales the whole HUD.
+- `WindowRenderState.width/height` stay **native** for every GUI consumer; only the
+  render-target resize reads are scaled (see `GameRendererMixin`). Scaling the state
+  globally makes the GUI projection disagree with the layout.
+- The GUI scissor is computed in native pixels (`coord * guiScale`, clamped against
+  the native state) and scaled to the target by `GuiRendererMixin`. Do not scale it
+  earlier: the y-flip and clamps inside `enableScissor` assume native space.
+- The whole frame (world + GUI) is rendered at the reduced resolution and upscaled as
+  one image. A separate full-resolution GUI target was prototyped and removed: the
+  vanilla GUI bakes fullscreen layer rects from the framebuffer size, so a
+  differently-sized GUI target displaces its background layers.
 - The swapchain comes from `queryFramebufferSize()` and must be the **real** window
   size: `GlSurface.blitFromTexture` presents with it, so scaling it draws the game
   into a sub-region of the window.

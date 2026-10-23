@@ -4,6 +4,9 @@ build/
 out/
 classes/
 
+# Build
+dist/*
+
 # IDEs
 .idea/
 *.iml

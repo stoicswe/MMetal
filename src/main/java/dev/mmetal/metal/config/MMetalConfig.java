@@ -22,6 +22,33 @@ public final class MMetalConfig {
 	}
 
 	/**
+	 * Look presets applied after the display transform ("Style" tab).
+	 * {@code LEGENDS} is implemented; the others are placeholders for the next pass.
+	 */
+	public enum Style {
+		NONE("None", "No look override."),
+		VHS("VHS", "WIP - warped chroma, tracking noise and tape grain."),
+		CRT("CRT", "WIP - scanlines, rounded edges and phosphor glow."),
+		NOIR("Noir", "WIP - high-contrast black and white."),
+		CINEMATIC("Cinematic", "WIP - letterbox, teal/orange grade."),
+		STEREO3D("Stereo 3D", "WIP - red/blue anaglyph."),
+		LEGENDS("Legends", "Painterly haze, soft edges, warm highlights and cool shadows.");
+
+		public final String label;
+		public final String description;
+
+		Style(String label, String description) {
+			this.label = label;
+			this.description = description;
+		}
+
+		/** Implemented looks (the rest are selectable but render unchanged for now). */
+		public boolean implemented() {
+			return this == NONE || this == LEGENDS;
+		}
+	}
+
+	/**
 	 * Render-resolution presets, matching the standard upscaler quality ladder
 	 * (linear scale factors like DLSS/FSR/XeSS).
 	 */
@@ -125,6 +152,11 @@ public final class MMetalConfig {
 	/** Experimental: present through a Metal CAMetalLayer with EDR (true HDR output). */
 	public boolean hdrOutput = false;
 
+	/** Look preset applied after the display transform. */
+	public Style style = Style.NONE;
+	/** Blend amount for the selected look (0 = off, 1 = full). */
+	public double styleStrength = 1.0;
+
 	public static MMetalConfig load() {
 		try {
 			if (Files.exists(PATH)) {
@@ -175,7 +207,7 @@ public final class MMetalConfig {
 
 	public String summary() {
 		return String.format(Locale.ROOT,
-			"enabled=%s quality=%s upscale=%s frameInterpolation=%s effects=%s",
-			enabled, qualityPreset, upscaleMode, frameInterpolation, effects.enabled);
+			"enabled=%s quality=%s upscale=%s frameInterpolation=%s effects=%s style=%s",
+			enabled, qualityPreset, upscaleMode, frameInterpolation, effects.enabled, style);
 	}
 }

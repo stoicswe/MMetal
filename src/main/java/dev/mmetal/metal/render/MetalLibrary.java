@@ -31,6 +31,7 @@ public final class MetalLibrary {
 	private final MemorySegment volumetricPipeline;
 	private final MemorySegment motionBlurPipeline;
 	private final MemorySegment tonemapPipeline;
+	private final MemorySegment stylePipeline;
 	private final MemorySegment reflectionsPipeline;
 	private final MemorySegment giPipeline;
 	private final MemorySegment bloomExtractPipeline;
@@ -41,7 +42,8 @@ public final class MetalLibrary {
 	private MetalLibrary(MemorySegment library, MemorySegment depthPipeline, MemorySegment ssrPipeline,
 	                     MemorySegment compositePipeline, MemorySegment motionPipeline,
 	                     MemorySegment volumetricPipeline, MemorySegment motionBlurPipeline,
-	                     MemorySegment tonemapPipeline, MemorySegment reflectionsPipeline,
+	                     MemorySegment tonemapPipeline, MemorySegment stylePipeline,
+	                     MemorySegment reflectionsPipeline,
 	                     MemorySegment giPipeline, MemorySegment bloomExtractPipeline,
 	                     MemorySegment bloomBlurPipeline, MemorySegment rtShadowPipeline,
 	                     MemorySegment worldLightPipeline) {
@@ -53,6 +55,7 @@ public final class MetalLibrary {
 		this.volumetricPipeline = volumetricPipeline;
 		this.motionBlurPipeline = motionBlurPipeline;
 		this.tonemapPipeline = tonemapPipeline;
+		this.stylePipeline = stylePipeline;
 		this.reflectionsPipeline = reflectionsPipeline;
 		this.giPipeline = giPipeline;
 		this.bloomExtractPipeline = bloomExtractPipeline;
@@ -94,6 +97,7 @@ public final class MetalLibrary {
 				MetalNative.computePipeline(library, "mm_volumetric"),
 				MetalNative.computePipeline(library, "mm_motionblur"),
 				MetalNative.computePipeline(library, "mm_tonemap"),
+				MetalNative.computePipeline(library, "mm_style"),
 				MetalNative.computePipeline(library, "mm_reflections"),
 				MetalNative.computePipeline(library, "mm_rtgi"),
 				MetalNative.computePipeline(library, "mm_bloom_extract"),
@@ -119,6 +123,10 @@ public final class MetalLibrary {
 
 	public MemorySegment tonemapPipeline() {
 		return tonemapPipeline;
+	}
+
+	public MemorySegment stylePipeline() {
+		return stylePipeline;
 	}
 
 	public MemorySegment reflectionsPipeline() {

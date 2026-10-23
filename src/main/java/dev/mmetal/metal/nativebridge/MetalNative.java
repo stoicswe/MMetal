@@ -260,11 +260,12 @@ public final class MetalNative {
 
 	/** Builds a primitive acceleration structure from a prebuilt bounding-box geometry descriptor. */
 	public static MemorySegment buildAccelerationStructure(MemorySegment descriptor) {
-		MemorySegment sizesSeg = ARENA.allocate(MTL_AS_SIZES);
-		MemorySegment sizes = (MemorySegment) invoke(MH_AS_SIZES, descriptor);
-		MemorySegment.copy(sizes, 0, sizesSeg, 0, MTL_AS_SIZES.byteSize()); // defensive copy out of the struct return
-		long asSize = sizesSeg.get(java.lang.foreign.ValueLayout.JAVA_LONG, 0);
-		long scratchSize = sizesSeg.get(java.lang.foreign.ValueLayout.JAVA_LONG, 8);
+		// accelerationStructureSizesWithDescriptor: returns a 24-byte struct
+		// (MTLAccelerationStructureSizes), so the downcall handle has a leading
+		// SegmentAllocator parameter that receives the returned struct.
+		MemorySegment sizes = (MemorySegment) invoke(MH_AS_SIZES, ARENA, DEVICE, descriptor);
+		long asSize = sizes.get(java.lang.foreign.ValueLayout.JAVA_LONG, 0);
+		long scratchSize = sizes.get(java.lang.foreign.ValueLayout.JAVA_LONG, 8);
 		MemorySegment accel = (MemorySegment) invoke(MH_NEW_AS, DEVICE, asSize);
 		require(accel, "newAccelerationStructureWithSize:");
 		MemorySegment scratch = (MemorySegment) invoke(MH_NEW_BUFFER_LEN, DEVICE, scratchSize,
