@@ -1327,7 +1327,6 @@ public final class MetalPipeline {
 		worldLightTex = null;
 		motionTex = null;
 		interpPrivateTex = null;
-		destroyNativeUiTarget();
 		spatialScaler = null;
 		temporalScaler = null;
 		frameInterpolator = null;
