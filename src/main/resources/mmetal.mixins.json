@@ -1,0 +1,19 @@
+{
+  "required": true,
+  "package": "dev.mmetal.metal.mixin",
+  "compatibilityLevel": "JAVA_17",
+  "minVersion": "0.8",
+  "client": [
+    "GameRendererMixin",
+    "GlSurfaceMixin",
+    "OptionsScreenMixin",
+    "ScreenInvoker",
+    "WindowMixin",
+    "MinecraftInvoker",
+    "DebugScreenOverlayMixin",
+    "FirstPersonHandsAndItemsRendererMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

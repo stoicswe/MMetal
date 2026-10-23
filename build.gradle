@@ -1,0 +1,92 @@
+plugins {
+	id 'net.fabricmc.fabric-loom' version "${loom_version}"
+}
+
+version = project.mod_version
+group = project.maven_group
+
+base {
+	archivesName = project.archives_base_name
+}
+
+repositories {
+	// Loom adds the essential maven repositories to download Minecraft and libraries from automatically.
+	// Add repositories for any other mod dependencies here.
+}
+
+dependencies {
+	minecraft "com.mojang:minecraft:${project.minecraft_version}"
+	implementation "net.fabricmc:fabric-loader:${project.loader_version}"
+
+	// Fabric API (client command API used by /mmetal)
+	implementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
+
+	// MixinExtras is bundled with Fabric Loader 0.15+ at runtime; needed here for compile-time annotations.
+	compileOnly "io.github.llamalad7:mixinextras-fabric:${project.mixinextras_version}"
+	annotationProcessor "io.github.llamalad7:mixinextras-fabric:${project.mixinextras_version}"
+}
+
+processResources {
+	def version = project.version
+	inputs.property "version", version
+
+	filesMatching("fabric.mod.json") {
+		expand "version": version
+	}
+}
+
+// Compile the Metal shader into a .metallib when building on macOS with Xcode.
+// The repository also ships a prebuilt .metallib, so non-macOS builds (e.g. the
+// GitHub Actions Linux builder) still package a working artifact.
+def compileMetalShaders = tasks.register("compileMetalShaders") {
+	def src = file("src/main/resources/metal/MMetalRaytrace.metal")
+	def out = file("src/main/resources/metal/MMetalRaytrace.metallib")
+	inputs.file(src)
+	outputs.file(out)
+	doLast {
+		def xcrun = ["which", "xcrun"].execute()
+		if (xcrun.waitFor() == 0) {
+			def proc = new ProcessBuilder("xcrun", "metal", src.absolutePath, "-o", out.absolutePath)
+				.redirectErrorStream(true).start()
+			def output = proc.inputStream.text
+			if (proc.waitFor() != 0) {
+				throw new GradleException("Metal shader compilation failed:\n${output}")
+			}
+			if (output.trim()) {
+				logger.lifecycle("metal: {}", output.trim())
+			}
+			logger.lifecycle("Compiled {}", out.name)
+		} else {
+			logger.warn("xcrun not found - keeping the prebuilt MMetalRaytrace.metallib")
+		}
+	}
+}
+
+tasks.matching { it.name == "processResources" }.configureEach {
+	dependsOn compileMetalShaders
+}
+
+// The metallib lives inside src/main/resources, so every archive task must wait for it.
+tasks.withType(Jar).configureEach {
+	dependsOn compileMetalShaders
+}
+
+tasks.withType(JavaCompile).configureEach {
+	it.options.release = 25
+	it.options.encoding = "UTF-8"
+}
+
+java {
+	withSourcesJar()
+	sourceCompatibility = JavaVersion.VERSION_25
+	targetCompatibility = JavaVersion.VERSION_25
+}
+
+jar {
+	def archiveBase = project.base.archivesName.get()
+	inputs.property "archiveBase", archiveBase
+
+	from("LICENSE") {
+		rename { "${it}_${archiveBase}" }
+	}
+}

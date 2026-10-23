@@ -1,0 +1,33 @@
+{
+	"schemaVersion": 1,
+	"id": "mmetal",
+	"version": "${version}",
+	"name": "MMetal",
+	"description": "Metal 4 & MetalFX integration for Minecraft: Apple Silicon upscaling, frame interpolation, and Metal compute effects.",
+	"authors": [
+		"MMetal contributors"
+	],
+	"contact": {
+		"homepage": "https://github.com/stoicswe/MMetal",
+		"sources": "https://github.com/stoicswe/MMetal"
+	},
+	"license": "MIT",
+	"environment": "client",
+	"entrypoints": {
+		"client": [
+			"dev.mmetal.metal.MetalFxMod"
+		]
+	},
+	"mixins": [
+		{
+			"config": "mmetal.mixins.json",
+			"environment": "client"
+		}
+	],
+	"depends": {
+		"fabricloader": ">=0.20.1",
+		"minecraft": ">=26.3",
+		"java": ">=25",
+		"fabric-api": "*"
+	}
+}

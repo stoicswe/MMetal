@@ -1,0 +1,8 @@
+*.java text
+*.json text
+*.gradle text
+*.md text
+*.yml text
+*.metal text
+*.metallib binary
+gradle-wrapper.jar binary
