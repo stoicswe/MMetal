@@ -124,8 +124,6 @@ public final class MMetalConfig {
 
 	/** Experimental: present through a Metal CAMetalLayer with EDR (true HDR output). */
 	public boolean hdrOutput = false;
-	/** Render the GUI/HUD into a full-resolution target (crisp text at reduced tiers). */
-	public boolean nativeUi = true;
 
 	public static MMetalConfig load() {
 		try {

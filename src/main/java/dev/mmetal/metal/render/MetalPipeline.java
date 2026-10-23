@@ -65,23 +65,6 @@ public final class MetalPipeline {
 			o = vec4(texture(uTex, vUv * uSize).rgb, 1.0);
 		}
 		""";
-	/**
-	 * UI-layer variant of the present shader. The GUI is composited with
-	 * premultiplied-alpha blending, so the sampled alpha must be kept. NOTE: the
-	 * sampler is sampler2DRect - binding a GL_TEXTURE_2D to a rect sampler yields an
-	 * incomplete texture and opaque black, which is why the GUI is first blitted into
-	 * an IOSurface-backed rectangle texture like the world layer.
-	 */
-	private static final String PRESENT_UI_FRAG = """
-		#version 410 core
-		uniform sampler2DRect uTex;
-		uniform vec2 uSize;
-		in vec2 vUv;
-		out vec4 o;
-		void main() {
-			o = texture(uTex, vUv * uSize);
-		}
-		""";
 	private static final String DEPTH_FRAG = """
 		#version 410 core
 		uniform sampler2D uDepth;
@@ -169,19 +152,11 @@ public final class MetalPipeline {
 	private MemorySegment worldLightTex;
 	private MemorySegment motionTex;
 	private final RtShadowBvh rtBvh = new RtShadowBvh(LOGGER);
-	private com.mojang.blaze3d.pipeline.RenderTarget nativeUiTarget;
-	private IosurfacePair uiColorPair;
-	private long uiDiagNanos;
-	private int uiBlitCount, uiClearCount, uiDrawCount;
-	/** Diag: GuiRenderer redirect fire counts and the accessor's null-reason code. */
-	public static volatile int uiRedirectCalls, uiRedirectUiHits, uiAccessBlockReason;
-	private boolean nativeUiClearPending;
 	private MemorySegment interpPrivateTex;
 	private MemorySegment spatialScaler;
 	private MemorySegment temporalScaler;
 	private MemorySegment frameInterpolator;
 	private int presentProgram;
-	private int uiPresentProgram;
 	private int depthProgram;
 	private long lastFrameNanos;
 	private float deltaTime = 1.0f / 60.0f;
@@ -245,81 +220,6 @@ public final class MetalPipeline {
 
 	public boolean isDisabled() {
 		return disabled;
-	}
-
-	/**
-	 * The full-resolution render target the GUI pass should draw into, or null when
-	 * the native-UI pass is inactive (Iris active, creation failed, MMetal off).
-	 */
-	public static com.mojang.blaze3d.pipeline.RenderTarget nativeUiTarget() {
-		MetalPipeline p = instance;
-		if (p == null) {
-			uiAccessBlockReason = 1;
-			return null;
-		}
-		if (p.disabled) {
-			uiAccessBlockReason = 2;
-			return null;
-		}
-		if (!p.config.enabled) {
-			uiAccessBlockReason = 3;
-			return null;
-		}
-		if (!p.config.nativeUi) {
-			uiAccessBlockReason = 4;
-			return null;
-		}
-		if (!p.bootstrapped) {
-			uiAccessBlockReason = 5;
-			return null;
-		}
-		if (p.nativeUiTarget == null) {
-			uiAccessBlockReason = 6;
-			return null;
-		}
-		if (dev.mmetal.metal.hook.Compat.irisShadersActive()) {
-			uiAccessBlockReason = 7;
-			return null;
-		}
-		uiAccessBlockReason = 0;
-		return p.nativeUiTarget;
-	}
-
-	/** The unmodified vanilla main render target (fallback for the GUI pass). */
-	public static com.mojang.blaze3d.pipeline.RenderTarget vanillaMainTarget() {
-		Minecraft mc = Minecraft.getInstance();
-		return mc != null && mc.gameRenderer != null ? mc.gameRenderer.mainRenderTarget() : null;
-	}
-
-	/** Marks the UI target for a transparent clear before the next GUI draw range. */
-	public static void requestNativeUiClear() {
-		MetalPipeline p = instance;
-		if (p != null) {
-			p.nativeUiClearPending = true;
-		}
-	}
-
-	/** Clears the UI target to transparent premultiplied black (called once per frame). */
-	public static void clearNativeUiIfPending() {
-		MetalPipeline p = instance;
-		if (p == null || !p.nativeUiClearPending || p.nativeUiTarget == null) {
-			return;
-		}
-		p.nativeUiClearPending = false;
-		p.uiClearCount++;
-		try {
-			// Direct GL clear: immediate and ordered before the subsequent GUI draws on
-			// the same context (the GUI pass itself clears depth in GuiRenderer.draw).
-			// The UI target must end up transparent-black so the GUI's TRANSLUCENT
-			// blend accumulates premultiplied RGBA that we can composite over the
-			// upscaled world.
-			p.gl.bindFboWithColor(p.gl.srcFbo(), p.textureGlId(p.nativeUiTarget.getColorTexture()),
-				GL_TEXTURE_2D, p.nativeUiTarget.width, p.nativeUiTarget.height);
-			glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
-			glClear(GL_COLOR_BUFFER_BIT);
-		} catch (Throwable t) {
-			LOGGER.warn("MMetal UI target clear failed", t);
-		}
 	}
 
 	/** Render scale in effect while a frame is being rendered (0 disables scaling). */
@@ -536,22 +436,10 @@ public final class MetalPipeline {
 				gl.drawQuad();
 				glBindSampler(0, 0);
 			}
-			// ---- 1.5 Capture the native-resolution UI layer (GL -> IOSurface) ----
-			if (nativeUiTarget != null && uiColorPair != null) {
-				gl.bindFboWithColor(gl.srcFbo(), textureGlId(nativeUiTarget.getColorTexture()),
-					GL_TEXTURE_2D, nativeUiTarget.width, nativeUiTarget.height);
-				gl.bindFboWithColor(gl.dstFbo(), uiColorPair.glTexture,
-					GL_TEXTURE_RECTANGLE, uiColorPair.width, uiColorPair.height);
-				gl.blitColor(gl.srcFbo(), nativeUiTarget.width, nativeUiTarget.height,
-					uiColorPair.width, uiColorPair.height);
-				uiBlitCount++;
-			}
-
 			// Make sure the GL queue has COMPLETED the IOSurface writes before Metal
 			// reads them. IOSurface does not auto-synchronize GL<->Metal; glFlush only
 			// submits, leaving a race that shows up as flickering/black frames.
 			glFinish();
-			uiDiag(main);
 
 			// ---- 3. Metal: upscaling, effects, frame interpolation ----
 			LOGGER.debug("MMetal present: metal encode");
@@ -605,9 +493,6 @@ public final class MetalPipeline {
 			}
 			renderedAnyFrame = true;
 			MetalStats.presentMs = (System.nanoTime() - tPresentStart) / 1.0e6;
-			if (nativeUiTarget != null) {
-				nativeUiClearPending = true; // cleared before the next frame's first GUI draw
-			}
 		} catch (Throwable t) {
 			fatal(t);
 		} finally {
@@ -652,21 +537,10 @@ public final class MetalPipeline {
 
 	private void presentToWindow(long windowHandle, IosurfacePair source) {
 		presentQuad(windowHandle, source.glTexture, source.width, source.height);
-		if (!hdrActiveNow && uiColorPair != null && nativeUiTarget != null) {
-			// Native-resolution UI composited over the upscaled world (premultiplied):
-			// the GUI pass rendered into nativeUiTarget at the window's real resolution
-			// and was blitted into uiColorPair during the capture step. The UI texture
-			// MUST be sampled through the rectangle path (the present shaders are
-			// sampler2DRect; a GL_TEXTURE_2D bound to a rect sampler is an incomplete
-			// texture and samples opaque black).
-			presentUiQuad();
-		}
 		// EXACTLY ONE swap per frame: the swap lives here, after every layer is drawn.
 		// (A swap inside presentQuad would alternate the double buffer and flash.)
 		SDLVideo.SDL_GL_SwapWindow(windowHandle);
 	}
-
-	private boolean hdrActiveNow;
 
 	/** Draws the upscaled world layer: IOSurface rectangle texture, opaque. */
 	private void presentQuad(long windowHandle, int rectTextureId, int texW, int texH) {
@@ -690,83 +564,6 @@ public final class MetalPipeline {
 		gl.drawQuad();
 		glBindSampler(0, 0);
 		glBindTexture(GL_TEXTURE_RECTANGLE, 0);
-	}
-
-	/** Draws the UI layer with premultiplied-alpha blending over the world layer. */
-	private void presentUiQuad() {
-		uiDrawCount++;
-		glBindFramebuffer(GL_FRAMEBUFFER, 0);
-		glViewport(0, 0, fullW, fullH);
-		glEnable(GL_BLEND);
-		glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
-		glDisable(GL_DEPTH_TEST);
-		glDisable(GL_SCISSOR_TEST);
-		glDisable(GL_CULL_FACE);
-		glUseProgram(uiPresentProgram);
-		glActiveTexture(GL_TEXTURE0);
-		glBindTexture(GL_TEXTURE_RECTANGLE, uiColorPair.glTexture);
-		glBindSampler(0, gl.linearSampler());
-		glUniform2f(glGetUniformLocation(uiPresentProgram, "uSize"),
-			uiColorPair.width, uiColorPair.height);
-		glUniform1i(glGetUniformLocation(uiPresentProgram, "uTex"), 0);
-		gl.drawQuad();
-		glBindSampler(0, 0);
-		glBindTexture(GL_TEXTURE_RECTANGLE, 0);
-		glDisable(GL_BLEND);
-	}
-
-	/**
-	 * TEMPORARY diagnostics: once per second, read back one pixel from every layer so
-	 * a black-output problem can be localized to a single surface.
-	 */
-	private void uiDiag(com.mojang.blaze3d.pipeline.RenderTarget main) {
-		long now = System.nanoTime();
-		if (now - uiDiagNanos < 1_000_000_000L) {
-			return;
-		}
-		uiDiagNanos = now;
-		try {
-			int err = glGetError();
-			// The UI blit left READ=srcFbo (UI target); rebind READ to dstFbo (the pair).
-			if (uiColorPair != null) {
-				gl.bindReadFbo(gl.dstFbo());
-			}
-			float[] pairC = uiColorPair != null
-				? readPixelCurrentFbo(uiColorPair.width / 2, uiColorPair.height / 2) : new float[4];
-			float[] pairK = uiColorPair != null ? readPixelCurrentFbo(2, 2) : new float[4];
-			// World layer: re-attach the main target color to srcFbo and read it.
-			int mainTex = textureGlId(main.getColorTexture());
-			gl.bindFboWithColor(gl.srcFbo(), mainTex, GL_TEXTURE_2D, main.width, main.height);
-			float[] world = readPixelCurrentFbo(main.width / 2, main.height / 2);
-			// UI target pixel.
-			float[] uiT = new float[4];
-			int uiTex = 0;
-			if (nativeUiTarget != null) {
-				uiTex = textureGlId(nativeUiTarget.getColorTexture());
-				gl.bindFboWithColor(gl.srcFbo(), uiTex, GL_TEXTURE_2D,
-					nativeUiTarget.width, nativeUiTarget.height);
-				uiT = readPixelCurrentFbo(nativeUiTarget.width / 2, nativeUiTarget.height / 2);
-			}
-			LOGGER.info(String.format(Locale.ROOT,
-				"UI diag: pair=(%.2f,%.2f,%.2f,%.2f) corner=(%.2f,%.2f,%.2f,%.2f)"
-					+ " uiTarget=(%.2f,%.2f,%.2f,%.2f) main=(%.2f,%.2f,%.2f,%.2f)"
-					+ " err=%d blit=%d clear=%d draw=%d uiTex=%d pairTex=%d"
-					+ " hdr=%s skip=%d redir=%d uiHit=%d block=%d",
-				pairC[0], pairC[1], pairC[2], pairC[3], pairK[0], pairK[1], pairK[2], pairK[3],
-				uiT[0], uiT[1], uiT[2], uiT[3], world[0], world[1], world[2], world[3],
-				err, uiBlitCount, uiClearCount, uiDrawCount, uiTex,
-				uiColorPair != null ? uiColorPair.glTexture : 0,
-				hdrActiveNow, MetalStats.skippedDrawables,
-				uiRedirectCalls, uiRedirectUiHits, uiAccessBlockReason));
-		} catch (Throwable t) {
-			LOGGER.warn("MMetal UI diag failed", t);
-		}
-	}
-
-	private float[] readPixelCurrentFbo(int x, int y) {
-		float[] f = new float[4];
-		glReadPixels(x, y, 1, 1, GL_RGBA, GL_FLOAT, f);
-		return f;
 	}
 
 	// ------------------------------------------------------------------
@@ -1409,15 +1206,6 @@ public final class MetalPipeline {
 		if (fi) {
 			interpColor = IosurfacePair.create(fullW, fullH, IosurfacePair.Kind.COLOR, ioUsage);
 		}
-		if (config.nativeUi) {
-			createNativeUiTarget(fullW, fullH);
-			if (nativeUiTarget != null
-				&& (uiColorPair == null || uiColorPair.width != fullW || uiColorPair.height != fullH)) {
-				closeQuietly(uiColorPair);
-				uiColorPair = IosurfacePair.create(fullW, fullH, IosurfacePair.Kind.COLOR, ioUsage);
-			}
-		}
-
 		long rwUsage = MetalNative.USAGE_SHADER_READ | MetalNative.USAGE_SHADER_WRITE;
 		privateFullTex = MetalNative.newTexture(fullW, fullH, MetalNative.PIXEL_FORMAT_BGRA8_UNORM, rwUsage,
 			MetalNative.STORAGE_MODE_PRIVATE);
@@ -1482,8 +1270,7 @@ public final class MetalPipeline {
 		if (presentProgram == 0) {
 			presentProgram = gl.program(VERT_SRC, PRESENT_FRAG, "mmetal-present");
 			depthProgram = gl.program(VERT_SRC, DEPTH_FRAG, "mmetal-depth");
-			uiPresentProgram = gl.program(VERT_SRC, PRESENT_UI_FRAG, "mmetal-present-ui");
-			if (presentProgram == 0 || depthProgram == 0 || uiPresentProgram == 0) {
+			if (presentProgram == 0 || depthProgram == 0) {
 				throw new IllegalStateException("MMetal GL programs failed to compile");
 			}
 		}
@@ -1497,34 +1284,7 @@ public final class MetalPipeline {
 		MetalStats.outputHeight = fullH;
 	}
 
-	private void destroyNativeUiTarget() {
-		if (nativeUiTarget != null) {
-			try {
-				nativeUiTarget.destroyBuffers();
-			} catch (Throwable ignored) {
-			}
-			nativeUiTarget = null;
-		}
-	}
-
-	private void createNativeUiTarget(int width, int height) {
-		if (nativeUiTarget != null && nativeUiTarget.width == width && nativeUiTarget.height == height) {
-			return;
-		}
-		destroyNativeUiTarget();
-		try {
-			nativeUiTarget = new com.mojang.blaze3d.pipeline.TextureTarget("mmetal_ui", width, height,
-				com.mojang.renderpearl.api.GpuFormat.RGBA8_UNORM, com.mojang.renderpearl.api.GpuFormat.D32_FLOAT);
-			LOGGER.info("MMetal native UI target: {}x{}", width, height);
-		} catch (Throwable t) {
-			LOGGER.warn("MMetal native UI target creation failed - GUI stays on the scaled target", t);
-			nativeUiTarget = null;
-		}
-	}
-
 	private void destroySizeResources() {
-		closeQuietly(uiColorPair);
-		uiColorPair = null;
 		closeQuietly(inColor);
 		closeQuietly(inDepth);
 		closeQuietly(outColor);
