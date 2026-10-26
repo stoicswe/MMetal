@@ -286,6 +286,8 @@ public final class MetalNative {
 		invoke(MH_BUILD_AS, encoder, accel, descriptor, scratch, 0L);
 		invoke(MH_END_ENCODING, encoder);
 		commitAndWait(cmd);
+		// The scratch buffer was created +1 and the build has completed, so it is ours to drop.
+		ObjCSend.invoke(ObjC.send(FunctionDescriptor.ofVoid(POINTER, POINTER)), scratch, ObjC.sel("release"));
 		return accel;
 	}
 

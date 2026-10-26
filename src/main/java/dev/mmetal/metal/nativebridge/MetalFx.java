@@ -11,32 +11,27 @@ import static dev.mmetal.metal.nativebridge.Layouts.NSUINTEGER;
 import static dev.mmetal.metal.nativebridge.Layouts.POINTER;
 
 /**
- * Bindings for the MetalFX framework: spatial upscaling (macOS 13+), temporal upscaling
- * (macOS 13+, experimental in MMetal) and frame interpolation (macOS 26+, the Metal 4 era
- * {@code MTLFXFrameInterpolator}).
+ * Bindings for the MetalFX framework: spatial upscaling and temporal upscaling
+ * (macOS 13+, temporal is experimental in MMetal).
  *
- * <p>See {@code MTLFXSpatialScaler.h}, {@code MTLFXTemporalScaler.h} and
- * {@code MTLFXFrameInterpolator.h} in the macOS SDK - selectors mirror those headers.</p>
+ * <p>See {@code MTLFXSpatialScaler.h} and {@code MTLFXTemporalScaler.h} in the macOS SDK -
+ * selectors mirror those headers.</p>
  */
 public final class MetalFx {
 	public static final String METALFX_FRAMEWORK = "/System/Library/Frameworks/MetalFX.framework/MetalFX";
 
 	// MTLFXSpatialScalerColorProcessingMode
 	public static final long COLOR_PROCESSING_PERCEPTUAL = 0;
-	public static final long COLOR_PROCESSING_LINEAR = 1;
-	public static final long COLOR_PROCESSING_HDR = 2;
 
 	private static final MemorySegment SPATIAL_DESCRIPTOR_CLASS;
 	private static final MemorySegment TEMPORAL_DESCRIPTOR_CLASS;
-	private static final MemorySegment FRAME_INTERPOLATOR_DESCRIPTOR_CLASS;
 
 	// Availability probes (class methods: receiver is the class object).
 	private static final MethodHandle MH_SUPPORTS_DEVICE = classBool("supportsDevice:");
 	private static final MethodHandle MH_SPATIAL_CREATE = methodObj("newSpatialScalerWithDevice:");
 	private static final MethodHandle MH_TEMPORAL_CREATE = methodObj("newTemporalScalerWithDevice:");
-	private static final MethodHandle MH_INTERPOLATOR_CREATE = methodObj("newFrameInterpolatorWithDevice:");
 
-	// Descriptor setters (shared across the three descriptor classes).
+	// Descriptor setters (shared across the two descriptor classes).
 	private static final MethodHandle MH_SET_COLOR_FORMAT = setterLong("setColorTextureFormat:");
 	private static final MethodHandle MH_SET_OUTPUT_FORMAT = setterLong("setOutputTextureFormat:");
 	private static final MethodHandle MH_SET_DEPTH_FORMAT = setterLong("setDepthTextureFormat:");
@@ -62,16 +57,6 @@ public final class MetalFx {
 	private static final MethodHandle MH_SC_SET_RESET = setterBool("setReset:");
 	private static final MethodHandle MH_SC_ENCODE = setterObj("encodeToCommandBuffer:");
 
-	// Frame interpolator instance methods.
-	private static final MethodHandle MH_FI_SET_PREV_COLOR = setterObj("setPrevColorTexture:");
-	private static final MethodHandle MH_FI_SET_DELTA_TIME = setterFloat("setDeltaTime:");
-	private static final MethodHandle MH_FI_SET_NEAR = setterFloat("setNearPlane:");
-	private static final MethodHandle MH_FI_SET_FAR = setterFloat("setFarPlane:");
-	private static final MethodHandle MH_FI_SET_FOV = setterFloat("setFieldOfView:");
-	private static final MethodHandle MH_FI_SET_ASPECT = setterFloat("setAspectRatio:");
-	private static final MethodHandle MH_FI_SET_RESET_HISTORY = setterBool("setShouldResetHistory:");
-	private static final MethodHandle MH_FI_SET_DEPTH_REVERSED = setterBool("setDepthReversed:");
-
 	private MetalFx() {
 	}
 
@@ -81,7 +66,6 @@ public final class MetalFx {
 		ObjC.framework(METALFX_FRAMEWORK, "MetalFX");
 		SPATIAL_DESCRIPTOR_CLASS = ObjC.cls("MTLFXSpatialScalerDescriptor");
 		TEMPORAL_DESCRIPTOR_CLASS = ObjC.cls("MTLFXTemporalScalerDescriptor");
-		FRAME_INTERPOLATOR_DESCRIPTOR_CLASS = ObjC.cls("MTLFXFrameInterpolatorDescriptor");
 	}
 
 	// ------------------------------------------------------------------
@@ -100,13 +84,6 @@ public final class MetalFx {
 			return false;
 		}
 		return classBool(TEMPORAL_DESCRIPTOR_CLASS, device);
-	}
-
-	public static boolean supportsFrameInterpolation(MemorySegment device) {
-		if (!SystemInfo.supportsFrameInterpolation()) {
-			return false;
-		}
-		return classBool(FRAME_INTERPOLATOR_DESCRIPTOR_CLASS, device);
 	}
 
 	// ------------------------------------------------------------------
@@ -160,28 +137,6 @@ public final class MetalFx {
 	}
 
 	// ------------------------------------------------------------------
-	// Frame interpolator
-	// ------------------------------------------------------------------
-
-	public static MemorySegment createFrameInterpolator(MemorySegment device, long colorFormat, long outputFormat,
-	                                                    long depthFormat, long motionFormat,
-	                                                    int inputWidth, int inputHeight,
-	                                                    int outputWidth, int outputHeight) {
-		MemorySegment descriptor = MetalNative.allocInit(FRAME_INTERPOLATOR_DESCRIPTOR_CLASS);
-		invoke(MH_SET_COLOR_FORMAT, descriptor, colorFormat);
-		invoke(MH_SET_OUTPUT_FORMAT, descriptor, outputFormat);
-		invoke(MH_SET_DEPTH_FORMAT, descriptor, depthFormat);
-		invoke(MH_SET_MOTION_FORMAT, descriptor, motionFormat);
-		invoke(MH_SET_INPUT_W, descriptor, (long) inputWidth);
-		invoke(MH_SET_INPUT_H, descriptor, (long) inputHeight);
-		invoke(MH_SET_OUTPUT_W, descriptor, (long) outputWidth);
-		invoke(MH_SET_OUTPUT_H, descriptor, (long) outputHeight);
-		MemorySegment interpolator = (MemorySegment) invoke(MH_INTERPOLATOR_CREATE, descriptor, device);
-		require(interpolator, "MTLFXFrameInterpolatorDescriptor.newFrameInterpolatorWithDevice:");
-		return interpolator;
-	}
-
-	// ------------------------------------------------------------------
 	// Scaler instance configuration + encode
 	// ------------------------------------------------------------------
 
@@ -207,30 +162,6 @@ public final class MetalFx {
 
 	public static void encodeScaler(MemorySegment scaler, MemorySegment commandBuffer) {
 		invoke(MH_SC_ENCODE, scaler, commandBuffer);
-	}
-
-	public static void configureInterpolator(MemorySegment interpolator, MemorySegment color,
-	                                         MemorySegment prevColor, MemorySegment depth, MemorySegment motion,
-	                                         MemorySegment output,
-	                                         float deltaTime, float nearPlane, float farPlane,
-	                                         float fieldOfView, float aspectRatio,
-	                                         boolean resetHistory) {
-		invoke(MH_SC_SET_COLOR, interpolator, color);
-		invoke(MH_FI_SET_PREV_COLOR, interpolator, prevColor);
-		invoke(MH_SC_SET_DEPTH, interpolator, depth);
-		invoke(MH_SC_SET_MOTION, interpolator, motion);
-		invoke(MH_SC_SET_OUTPUT, interpolator, output);
-		invoke(MH_FI_SET_DELTA_TIME, interpolator, deltaTime);
-		invoke(MH_FI_SET_NEAR, interpolator, nearPlane);
-		invoke(MH_FI_SET_FAR, interpolator, farPlane);
-		invoke(MH_FI_SET_FOV, interpolator, fieldOfView);
-		invoke(MH_FI_SET_ASPECT, interpolator, aspectRatio);
-		invoke(MH_FI_SET_RESET_HISTORY, interpolator, bool(resetHistory));
-		invoke(MH_FI_SET_DEPTH_REVERSED, interpolator, (byte) 1);
-	}
-
-	public static void encodeInterpolator(MemorySegment interpolator, MemorySegment commandBuffer) {
-		invoke(MH_SC_ENCODE, interpolator, commandBuffer);
 	}
 
 	// ------------------------------------------------------------------

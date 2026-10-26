@@ -22,41 +22,6 @@ public final class MMetalConfig {
 	}
 
 	/**
-	 * What MMetal does while an Iris shader pack is actively rendering. The pack owns
-	 * the look of the world; MMetal's present-time features still compose on top of it.
-	 */
-	public enum IrisMode {
-		/** Passthrough: vanilla presents the pack's frame untouched (legacy behaviour). */
-		STAND_DOWN,
-		/** The pack owns the look; MMetal adds MetalFX upscale + frame interpolation. */
-		METALFX,
-		/** The full pipeline (MMetal lighting effects included) runs under the pack too. */
-		FULL
-	}
-
-	/**
-	 * Display palette (the tonemap/display transform). {@code EXTENDED} is the EDR look
-	 * as an SDR option; the graded palettes ({@code VIBRANT}, {@code WARM}, {@code COOL})
-	 * apply their grade in both SDR and HDR; {@code NATURAL} minimises the HDR boost.
-	 */
-	public enum Palette {
-		/** Linear-light filmic knee - the classic SDR look. */
-		FILMIC,
-		/** Extended range: the HDR look without HDR (highlight lift + shadow depth). */
-		EXTENDED,
-		/** Vanilla-like vibrance: saturated, punchy, and applied to HDR output too. */
-		VIBRANT,
-		/** Golden/amber tint, luma-preserving, applied to HDR output too. */
-		WARM,
-		/** Blue/cyan tint, luma-preserving, applied to HDR output too. */
-		COOL,
-		/** Minimal processing: no grade, and HDR keeps the SDR look (no highlight lift). */
-		NATURAL,
-		/** No display transform - raw pipeline output. */
-		NEUTRAL
-	}
-
-	/**
 	 * Render-resolution presets, matching the standard upscaler quality ladder
 	 * (linear scale factors like DLSS/FSR/XeSS).
 	 */
@@ -69,6 +34,11 @@ public final class MMetalConfig {
 		BALANCED(0.58, "Balanced"),
 		/** 67% linear (about 44% of the pixels) */
 		QUALITY(2.0 / 3.0, "Quality"),
+		/**
+		 * Render scale follows the measured frame time (see {@code DynamicResolution}).
+		 * The scale here is only the starting point.
+		 */
+		DYNAMIC(2.0 / 3.0, "Dynamic"),
 		/** Native resolution, no upscaling */
 		NONE(1.0, "None");
 
@@ -85,6 +55,9 @@ public final class MMetalConfig {
 			QualityPreset best = QUALITY;
 			double bestDelta = Double.MAX_VALUE;
 			for (QualityPreset preset : values()) {
+				if (preset == DYNAMIC) {
+					continue; // never a migration target: it has no fixed scale
+				}
 				double delta = Math.abs(preset.scale - scale);
 				if (delta < bestDelta) {
 					bestDelta = delta;
@@ -100,19 +73,19 @@ public final class MMetalConfig {
 	/** Render-resolution tier; the MetalFX upscaler restores full resolution. */
 	public QualityPreset qualityPreset = QualityPreset.QUALITY;
 
+	/** Dynamic preset: lowest render scale it may drop to. */
+	public double dynamicMinScale = 0.5;
+
+	/** Dynamic preset: highest render scale it may rise to (1.0 = native). */
+	public double dynamicMaxScale = 1.0;
+
+	/** Dynamic preset: frame rate to hold. 0 = match the display refresh (and Max FPS). */
+	public int dynamicTargetFps = 0;
+
 	/** Legacy free-form scale (pre-preset configs). Migrated to qualityPreset on load. */
 	public double renderScale = 0.75;
 
 	public UpscaleMode upscaleMode = UpscaleMode.SPATIAL;
-
-	/** Behaviour while an Iris shader pack is actively rendering (see {@link IrisMode}). */
-	public IrisMode irisMode = IrisMode.METALFX;
-
-	/** Display palette / tonemap transform (see {@link Palette}). */
-	public Palette palette = Palette.FILMIC;
-
-	/** MetalFX Frame Interpolation (macOS 26+). Set the game's Max FPS to half your refresh rate. */
-	public boolean frameInterpolation = false;
 
 	public Effects effects = new Effects();
 
@@ -126,13 +99,10 @@ public final class MMetalConfig {
 		public double aoStrength = 0.45;
 		public int marchSteps = 12;
 		public double rayLength = 6.0;
-		/** Derive the sun direction from the world clock (god rays follow the real sun). */
+		/** Derive the sun direction from the world clock. */
 		public boolean sunFromWorldTime = true;
 		public double sunElevationDeg = 55.0;
 		public double sunAzimuthDeg = 135.0;
-		/** Screen-space volumetric light shafts (god rays) toward the configured sun. */
-		public boolean volumetricLight = true;
-		public double volumetricStrength = 0.15;
 		/** Ray traced reflections (screen space). */
 		public boolean reflections = false;
 		public double reflectionStrength = 0.35;
@@ -144,36 +114,10 @@ public final class MMetalConfig {
 		/** Hardware ray-traced shadows: BVH of block bounding boxes, traced on the GPU. */
 		public boolean hardwareRtShadows = false;
 		public int rtShadowRadius = 24;
-		/** Screen-space glow around a light-emitting item held in hand. */
-		public boolean heldLightGlow = true;
-		public double heldLightStrength = 0.6;
-		/** Flame position above the first-person item origin (blocks, camera space). */
-		public double flameTipHeight = 0.35;
-		/** Firelight flicker and flame particles for a light source held in hand. */
-		public boolean heldLightFlicker = true;
-		public boolean heldLightParticles = true;
-		/** Emissive glow: torches, lava, glowstone and the sun bleed light. */
-		public boolean bloom = true;
-		public double bloomStrength = 0.35;
 		/** Camera-motion blur (blends with the previous frame's final image). */
 		public boolean motionBlur = false;
 		public double motionBlurStrength = 0.3;
-		/** ACES filmic tonemap - rolls the sun/highlights off instead of clipping flat white. */
-		public boolean tonemap = true;
-		public double exposure = 1.0;
 	}
-
-	/** Experimental: present through a Metal CAMetalLayer with EDR (true HDR output). */
-	public boolean hdrOutput = false;
-	/** HDR paper-white gain: scene brightness multiplier in EDR output (1.0 = reference). */
-	public double hdrBrightness = 1.0;
-	/** HDR shadow rendition: 0 = neutral, 1 = deepest shadows (the "darkness" slider). */
-	public double hdrDarkness = 0.0;
-
-	/** Look preset id (see {@code dev.mmetal.api.MMetalStyles}); "none" disables it. */
-	public String styleId = "none";
-	/** Blend amount for the selected look (0 = off, 1 = full). */
-	public double styleStrength = 1.0;
 
 	public static MMetalConfig load() {
 		try {
@@ -205,17 +149,9 @@ public final class MMetalConfig {
 		if (upscaleMode == null) {
 			upscaleMode = UpscaleMode.SPATIAL;
 		}
-		if (irisMode == null) {
-			irisMode = IrisMode.METALFX;
-		}
-		if (palette == null) {
-			palette = Palette.FILMIC;
-		}
-		if (styleId == null || styleId.isBlank()) {
-			styleId = "none";
-		} else {
-			styleId = styleId.trim().toLowerCase(java.util.Locale.ROOT);
-		}
+		dynamicMinScale = Math.max(0.25, Math.min(1.0, dynamicMinScale));
+		dynamicMaxScale = Math.max(dynamicMinScale, Math.min(1.0, dynamicMaxScale));
+		dynamicTargetFps = Math.max(0, dynamicTargetFps);
 	}
 
 	/** Effective linear render scale for this frame. */
@@ -235,8 +171,7 @@ public final class MMetalConfig {
 	}
 
 	public String summary() {
-		return String.format(Locale.ROOT,
-			"enabled=%s quality=%s upscale=%s iris=%s palette=%s frameInterpolation=%s effects=%s style=%s",
-			enabled, qualityPreset, upscaleMode, irisMode, palette, frameInterpolation, effects.enabled, styleId);
+		return String.format(Locale.ROOT, "enabled=%s quality=%s upscale=%s effects=%s",
+			enabled, qualityPreset, upscaleMode, effects.enabled);
 	}
 }

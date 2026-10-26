@@ -47,14 +47,4 @@ public final class SystemInfo {
 	public static boolean supportsMetalFxUpscaling() {
 		return MAC && (MAJOR > 13 || (MAJOR == 13 && MINOR >= 0)) && MAJOR >= 13;
 	}
-
-	/** MetalFX frame interpolation requires macOS 26 (Tahoe) or newer. */
-	public static boolean supportsFrameInterpolation() {
-		return MAC && MAJOR >= 26;
-	}
-
-	/** Metal 4 FX (Metal-4-command-buffer compatible effects) require macOS 26+. */
-	public static boolean supportsMetal4Fx() {
-		return MAC && MAJOR >= 26;
-	}
 }

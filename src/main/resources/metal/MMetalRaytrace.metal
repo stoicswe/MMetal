@@ -32,31 +32,20 @@ struct EffectParams {
     float  time;            // seconds, for temporal jitter
     float  tanHalfFovY;     // tan(vertical FOV / 2)
     float  aspect;          // width / height
-    float4 sunScreen;       // sun position on screen: xy = uv, z = onScreen flag, w = volumetric strength
+    float  pad0;
     float  motionBlurAmount;// 0..1 blend factor toward the previous frame
-    float  exposure;        // pre-tonemap gain
-    float  tonemapMode;     // 0 = off, 1 = filmic knee (SDR), 2 = HDR inverse-tonemap
-    float  headroom;        // EDR headroom multiplier for HDR mode (1.0 = SDR white)
     float  reflectionStrength; // 0..1 ray traced reflections
     float  giStrength;         // 0..1 ray traced global illumination
     float  denoise;            // >0.5 = denoise the effect mask
-    float  bloomStrength;      // 0..1 emissive glow (torches, lava, glowstone...)
-    float4 handGlow;           // rgb = held light colour, w = strength
-    float2 handGlowPos;        // screen position of the held light (uv)
-    float  rtShadowMix;        // 0..1 blend in the hardware ray-traded shadow texture
-    float  styleId;            // mm_style: look id (see MMetalConfig.Style ordinal)
-    float  hdrDarkness;        // HDR only: 0 = neutral, 1 = deepest shadow rendition
-    float  palette;            // >0.5 = VIBRANT grade (saturation + micro-contrast)
-    float  uiMask;             // >0.5 = keep GUI/HUD pixels at SDR appearance (HDR)
+    float  rtShadowMix;        // 0..1 blend in the hardware ray-traced shadow texture
+    float  pad1;
+    float  pad2;
+    float  pad3;
 };
 // Java-side offsets: viewport@0, near@8, far@12, sunStrength@16, aoStrength@20,
 // steps@24, rayLength@28, sunDirEye@32, time@48, tanHalfFovY@52, aspect@56,
-// sunScreen@64, motionBlurAmount@80, exposure@84, tonemapMode@88, headroom@92,
-// reflectionStrength@96, giStrength@100, denoise@104, bloomStrength@108,
-// handGlow@112, handGlowPos@128, rtShadowMix@136, styleId@140, hdrDarkness@144,
-// palette@148, uiMask@152, size 156.
-// mm_style also reuses headroom@92 as the style strength.
-// mm_style also reuses headroom@92 as the style strength.
+// motionBlurAmount@64, reflectionStrength@68, giStrength@72, denoise@76,
+// rtShadowMix@80, size 96.
 
 // Per-frame camera parameters for motion vector generation.
 struct MotionParams {
@@ -128,6 +117,14 @@ static float hashJitter(float2 xy, float t) {
 // that MetalFX and the other kernels can consume directly.
 // ----------------------------------------------------------------------------
 
+// The GL side packs 24-bit depth as three bytes, each divided by 255 (see DEPTH_FRAG), so
+// the channels read here are byte/255 - the bytes have to be restored before weighting
+// them. Without the 255 every depth came out 255x too small (everything "hundreds of
+// metres away": no parallax, no depth for any effect).
+static inline float mmetalUnpackDepth(float3 packedRgb) {
+    return (packedRgb.r * 65536.0 + packedRgb.g * 256.0 + packedRgb.b) * 255.0 / 16777215.0;
+}
+
 kernel void mm_depth(
     texture2d<float, access::read>  packedDepth [[texture(0)]],
     texture2d<float, access::write> outDepth    [[texture(1)]],
@@ -135,8 +132,8 @@ kernel void mm_depth(
 {
     float4 p = packedDepth.read(gid);
     // p.r = most significant byte, p.g = middle, p.b = least significant (see GLSL writer).
-    float d = (p.r * 65536.0 + p.g * 256.0 + p.b) / 16777215.0;
-    outDepth.write(float4(d, 0.0, 0.0, 1.0), gid);
+	    float d = mmetalUnpackDepth(p.rgb);
+	    outDepth.write(float4(d, 0.0, 0.0, 1.0), gid);
 }
 
 // ----------------------------------------------------------------------------
@@ -210,165 +207,6 @@ kernel void mm_ssr_shadows(
     }
 
     outMask.write(float4(shadow, ao, dot(color.rgb, float3(0.2126, 0.7152, 0.0722)), 1.0), gid);
-}
-
-// ----------------------------------------------------------------------------
-// Kernel 6: display transform
-//   mode 1: filmic highlight rolloff in LINEAR light - midtones are preserved
-//           exactly (decode -> knee -> encode), only highlights above the knee
-//           are compressed, so the sun stops clipping flat white without
-//           brightening the rest of the frame.
-//   mode 2: HDR inverse-tonemap into scene-linear extended range for EDR
-//           presentation (values above 1.0 = brighter than SDR white).
-// ----------------------------------------------------------------------------
-
-// Exact piecewise sRGB transfer. A pure pow(2.2) approximation mismatches the real
-// curve in the shadows (it lacks the linear toe), which biases dark gradients and
-// shows up as banding after the display transform.
-static float3 mmetalSrgbToLinear(float3 c) {
-    float3 lo = c / 12.92;
-    float3 hi = pow(max(c + 0.055, 0.001) / 1.055, float3(2.4));
-    return float3(c.r <= 0.04045 ? lo.r : hi.r,
-                  c.g <= 0.04045 ? lo.g : hi.g,
-                  c.b <= 0.04045 ? lo.b : hi.b);
-}
-
-static float3 mmetalLinearToSrgb(float3 c) {
-    float3 lo = c * 12.92;
-    float3 hi = 1.055 * pow(max(c, 0.0), float3(1.0 / 2.4)) - 0.055;
-    return float3(c.r <= 0.0031308 ? lo.r : hi.r,
-                  c.g <= 0.0031308 ? lo.g : hi.g,
-                  c.b <= 0.0031308 ? lo.b : hi.b);
-}
-
-// Triangular hash dither (+-1 LSB at 8-bit) applied before writing the display
-// surface: the tonemap/knee and the 8-bit working textures compress gradients, and
-// quantising them without dither bands visible (sky especially).
-static float mmetalHash01(uint2 p, uint seed) {
-    uint n = p.x * 1973u + p.y * 9277u + seed * 26699u;
-    n = (n << 13u) ^ n;
-    n = n * (n * n * 15731u + 789221u) + 1376312589u;
-    return float((n >> 8u) & 0xffffu) / 65535.0;
-}
-
-static float3 mmetalDither8(uint2 gid) {
-    float3 noise = float3(
-        mmetalHash01(gid, 1u) + mmetalHash01(gid, 2u) - 1.0,
-        mmetalHash01(gid, 3u) + mmetalHash01(gid, 4u) - 1.0,
-        mmetalHash01(gid, 5u) + mmetalHash01(gid, 6u) - 1.0);
-    return noise / 255.0;
-}
-
-/** Soft-knee highlight compressor: identity below K, smooth rolloff above. */
-static float3 mmetalHighlightKnee(float3 c) {
-    const float K = 0.80;
-    float3 over = max(c - K, 0.0);
-    float3 compressed = K + (1.0 - K) * (1.0 - exp(-over / (1.0 - K)));
-    return float3(c.r <= K ? c.r : compressed.r,
-                  c.g <= K ? c.g : compressed.g,
-                  c.b <= K ? c.b : compressed.b);
-}
-
-kernel void mm_tonemap(
-    texture2d<float, access::read>  inColor  [[texture(0)]],
-    texture2d<float>                   bloom [[texture(1)]],
-    texture2d<float, access::write> outColor [[texture(2)]],
-    texture2d<float, access::read> worldColor [[texture(3)]],
-    constant EffectParams          &params   [[buffer(0)]],
-    uint2 gid                                                [[thread_position_in_grid]])
-{
-    if (gid.x >= (uint)params.viewport.x || gid.y >= (uint)params.viewport.y) { return; }
-    constexpr sampler smpB(address::clamp_to_edge, filter::linear);
-    float2 uv = (float2(gid) + 0.5) / params.viewport;
-    // Emissive bloom adds light before the display transform.
-    float3 bloomAdd = bloom.sample(smpB, uv).rgb * params.bloomStrength;
-    float3 base = inColor.read(gid).rgb + bloomAdd;
-    // Held light source glow (torch/lantern in hand): soft radial falloff so the
-    // emitter visibly lights the area around the hand.
-    float2 hd = uv - params.handGlowPos;
-    float heldGlow = exp(-dot(hd, hd) / 0.008) * params.handGlow.w;
-    base += params.handGlow.rgb * heldGlow;
-    float3 c = max(base, float3(0.0)) * params.exposure;
-    float3 lin = mmetalSrgbToLinear(saturate(c));
-    // Palette grade (scene-linear). The graded palettes apply in every display path -
-    // including HDR - so the chosen look survives the EDR transform.
-    //   1 = VIBRANT  luma-preserving chroma lift + gentle micro-contrast
-    //   2 = WARM     golden/amber tint (luma-preserving)
-    //   3 = COOL     blue/cyan tint (luma-preserving)
-    //   4 = NATURAL  no grade; HDR also drops the highlight lift below
-    int palette = (int) (params.palette + 0.5);
-    if (palette == 1) {
-        float gradeLuma = dot(lin, float3(0.2126, 0.7152, 0.0722));
-        lin = gradeLuma + (lin - gradeLuma) * 1.35;
-        lin = mix(lin, lin * lin * (3.0 - 2.0 * lin), 0.2);
-        lin = max(lin, 0.0);
-    } else if (palette == 2 || palette == 3) {
-        float gradeLuma = dot(lin, float3(0.2126, 0.7152, 0.0722));
-        float3 gains = palette == 2 ? float3(1.10, 1.02, 0.88) : float3(0.90, 1.00, 1.12);
-        float3 tinted = lin * gains;
-        // Re-normalise to the original luma so the tint changes hue, not brightness.
-        tinted *= gradeLuma / max(dot(tinted, float3(0.2126, 0.7152, 0.0722)), 1e-4);
-        lin = tinted;
-    }
-
-    if (params.tonemapMode > 2.5) {
-        // Extended SDR palette: the EDR look without EDR - a fixed highlight lift over
-        // the linear image, re-encoded to the 8-bit display surface.
-        float luma = dot(lin, float3(0.2126, 0.7152, 0.0722));
-        float boost = 1.0 + 0.65 * pow(saturate((luma - 0.4) / 0.6), 2.0);
-        float shadowW = 1.0 - saturate(luma / 0.25);
-        lin *= 1.0 - params.hdrDarkness * shadowW * 0.8;
-        outColor.write(float4(clamp(mmetalLinearToSrgb(lin * boost) + mmetalDither8(gid),
-                                    0.0, 1.0), 1.0), gid);
-    } else if (params.tonemapMode > 1.5) {
-        // HDR: present the SDR image in linear form, with a soft lift only in the upper
-        // midtones/highlights, bounded by the panel's EDR headroom. A strong luma-driven
-        // boost pushes whole gradients past the headroom, where the display clamps them
-        // into flat regions - that is what made skies band.
-        float luma = dot(lin, float3(0.2126, 0.7152, 0.0722));
-        float headroom = palette == 4 ? 1.0 : max(1.0, params.headroom);
-        float lift = saturate((luma - 0.5) / 0.5);
-        float3 hdrOut = lin * (1.0 + (headroom - 1.0) * 0.35 * lift * lift);
-        hdrOut = min(hdrOut, float3(headroom));
-        // Darkness slider: pull shadow luminance down without touching midtones or
-        // highlights (the black-level half of the AAA HDR calibration pair).
-        float shadowW = 1.0 - saturate(luma / 0.25);   // 1 near black, 0 by 25% grey
-        hdrOut *= 1.0 - params.hdrDarkness * shadowW * 0.8;
-        // GUI/HUD stays SDR: pixels the interface touched differ between the full frame
-        // and the world-only capture. Those keep the unboosted linear value (= SDR
-        // white) instead of being pushed into the EDR headroom. A menu's dimmed
-        // backdrop touches the whole screen, so menus read fully SDR.
-        if (params.uiMask > 0.5) {
-            float3 rawFull = inColor.read(gid).rgb;
-            float3 rawWorld = worldColor.read(gid).rgb;
-            float diff = max(max(abs(rawFull.r - rawWorld.r), abs(rawFull.g - rawWorld.g)),
-                             abs(rawFull.b - rawWorld.b));
-            if (diff > (2.0 / 255.0)) {
-                hdrOut = lin;
-            }
-        }
-        // The pipeline's working textures are bottom-up (they are sampled by the GL
-        // present quad without a v-flip); a CAMetalLayer drawable is top-down, so the
-        // EDR write flips Y to present upright. A sub-LSB triangular dither breaks the
-        // remaining quantisation steps the 8-bit source leaves in the linear image.
-        hdrOut += mmetalDither8(gid) * 0.25;
-        outColor.write(float4(max(hdrOut, 0.0), 1.0),
-                       uint2(gid.x, (uint)params.viewport.y - 1u - gid.y));
-    } else if (params.tonemapMode > 0.5) {
-        // Linear-light filmic knee: midtones exact, highlights compressed.
-        outColor.write(float4(clamp(mmetalLinearToSrgb(mmetalHighlightKnee(lin)) + mmetalDither8(gid),
-                                    0.0, 1.0), 1.0), gid);
-    } else {
-        // Neutral: display-referred passthrough (the vanilla look). With a graded
-        // palette active the graded linear color is re-encoded instead.
-        float3 out;
-        if (palette != 0) {
-            out = clamp(mmetalLinearToSrgb(lin) + mmetalDither8(gid), 0.0, 1.0);
-        } else {
-            out = c;
-        }
-        outColor.write(float4(out, 1.0), gid);
-    }
 }
 
 // ----------------------------------------------------------------------------
@@ -477,107 +315,6 @@ kernel void mm_rtgi(
 }
 
 // ----------------------------------------------------------------------------
-// Kernel 9: emissive bloom (glowing torches, lava, glowstone, the sun)
-//   A thresholded bright-pass followed by a separable blur; the tonemap stage
-//   adds the result so emitters bleed light into their surroundings.
-// ----------------------------------------------------------------------------
-
-kernel void mm_bloom_extract(
-    texture2d<float, access::read>  inColor [[texture(0)]],
-    texture2d<float, access::write> outBloom [[texture(1)]],
-    constant EffectParams          &params  [[buffer(0)]],
-    uint2 gid                                               [[thread_position_in_grid]])
-{
-    if (gid.x >= (uint)params.viewport.x || gid.y >= (uint)params.viewport.y) { return; }
-    float3 c = inColor.read(gid).rgb;
-    float luma = dot(c, float3(0.2126, 0.7152, 0.0722));
-    float threshold = 0.75;
-    float knee = 0.15;
-    float weight = saturate((luma - threshold + knee) / (2.0 * knee + 1e-4));
-    weight = max(weight, step(threshold, luma));
-    outBloom.write(float4(c * weight, 1.0), gid);
-}
-
-kernel void mm_bloom_blur(
-    texture2d<float, access::read>  inBloom  [[texture(0)]],
-    texture2d<float>             blurSampler [[texture(1)]],
-    texture2d<float, access::write> outBloom [[texture(2)]],
-    constant EffectParams          &params   [[buffer(0)]],
-    constant float2               &direction [[buffer(1)]],
-    uint2 gid                                                 [[thread_position_in_grid]])
-{
-    if (gid.x >= (uint)params.viewport.x || gid.y >= (uint)params.viewport.y) { return; }
-    constexpr sampler smp(address::clamp_to_edge, filter::linear);
-    float2 uv = (float2(gid) + 0.5) / params.viewport;
-    float2 texel = 1.0 / params.viewport;
-
-    // 9-tap gaussian, normalised.
-    const float w0 = 0.227027, w1 = 0.194594, w2 = 0.121621, w3 = 0.054054, w4 = 0.016216;
-    float3 acc = blurSampler.sample(smp, uv).rgb * w0;
-    acc += blurSampler.sample(smp, uv + direction * texel * 1.0).rgb * w1;
-    acc += blurSampler.sample(smp, uv - direction * texel * 1.0).rgb * w1;
-    acc += blurSampler.sample(smp, uv + direction * texel * 2.0).rgb * w2;
-    acc += blurSampler.sample(smp, uv - direction * texel * 2.0).rgb * w2;
-    acc += blurSampler.sample(smp, uv + direction * texel * 3.0).rgb * w3;
-    acc += blurSampler.sample(smp, uv - direction * texel * 3.0).rgb * w3;
-    acc += blurSampler.sample(smp, uv + direction * texel * 4.0).rgb * w4;
-    acc += blurSampler.sample(smp, uv - direction * texel * 4.0).rgb * w4;
-    outBloom.write(float4(acc, 1.0), gid);
-}
-
-// ----------------------------------------------------------------------------
-// Kernel 3: volumetric light shafts (god rays) toward the sun
-//   Marches from each pixel toward the sun's screen position, accumulating sky
-//   brightness; geometry (depth > 0) occludes the shaft.
-// ----------------------------------------------------------------------------
-
-kernel void mm_volumetric(
-    texture2d<float>           colorSampler [[texture(0)]],
-    texture2d<float>           depthSampler [[texture(1)]],
-    texture2d<float, access::write> outGlow [[texture(2)]],
-    constant EffectParams     &params      [[buffer(0)]],
-    uint2 gid                                            [[thread_position_in_grid]])
-{
-    if (gid.x >= (uint)params.viewport.x || gid.y >= (uint)params.viewport.y) { return; }
-
-    float2 uv = (float2(gid) + 0.5) / params.viewport;
-    constexpr sampler smp(address::clamp_to_edge, filter::linear);
-    constexpr sampler dsmp(address::clamp_to_edge, filter::nearest);
-
-    if (params.sunScreen.z < 0.5 || params.sunScreen.w <= 0.001) {
-        outGlow.write(float4(0.0), gid);
-        return;
-    }
-
-    const int STEPS = 24;
-    float2 sunUV = params.sunScreen.xy;
-    float3 acc = float3(0.0);
-    float  total = 0.0;
-
-    for (int i = 1; i <= STEPS; i++) {
-        float t = (float)i / (float)STEPS;
-        float2 suv = mix(uv, sunUV, t);
-        float depth01 = depthSampler.sample(dsmp, suv).r;
-        if (depth01 <= 0.0) {
-            // Sky: shafts pass through and pick up brightness.
-            float3 c = colorSampler.sample(smp, suv).rgb;
-            float falloff = 1.0 - t * 0.55; // brighter near the sun
-            acc += c * falloff;
-            total += falloff;
-        }
-    }
-    if (total <= 0.0) {
-        outGlow.write(float4(0.0), gid);
-        return;
-    }
-    float3 glow = acc / max(total, 1e-4) * (total / (float)STEPS) * 2.0;
-    // Clamp so a bright sun can never blow out the frame; the tonemap stage
-    // rolls the rest off filmically.
-    glow = min(glow * params.sunScreen.w, float3(1.25));
-    outGlow.write(float4(glow, 1.0), gid);
-}
-
-// ----------------------------------------------------------------------------
 // Kernel 4: motion blur - blend the final image with the previous final image
 //   by the camera-motion amount. Gives smooth trailing on fast camera movement.
 // ----------------------------------------------------------------------------
@@ -602,7 +339,7 @@ kernel void mm_motionblur(
 
 // ----------------------------------------------------------------------------
 // Kernel 5: motion vectors from depth reprojection (camera-motion exact,
-// entity motion approximated) - feeds MetalFX Frame Interpolation.
+// entity motion approximated) - feeds the MetalFX temporal upscaler.
 // ----------------------------------------------------------------------------
 
 kernel void mm_motion(
@@ -643,12 +380,10 @@ kernel void mm_motion(
 kernel void mm_composite(
     texture2d<float, access::read>  inColor  [[texture(0)]],
     texture2d<float, access::read>  inMask   [[texture(1)]],
-    texture2d<float>             volumetric [[texture(2)]],
-    texture2d<float>            reflections [[texture(3)]],
-    texture2d<float>                   giOut [[texture(4)]],
-    texture2d<float>               rtShadow [[texture(5)]],
-    texture2d<float>            worldLight [[texture(6)]],
-    texture2d<float, access::write> outColor [[texture(7)]],
+    texture2d<float>            reflections [[texture(2)]],
+    texture2d<float>                   giOut [[texture(3)]],
+    texture2d<float>               rtShadow [[texture(4)]],
+    texture2d<float, access::write> outColor [[texture(5)]],
     constant EffectParams          &params   [[buffer(0)]],
     uint2 gid                                                [[thread_position_in_grid]])
 {
@@ -675,13 +410,10 @@ kernel void mm_composite(
     shadow = mix(1.0, mask.r, params.sunStrength);
     ao = mix(1.0, mask.g, params.aoStrength);
     float3 lit = color.rgb * shadow * ao;
-    lit += volumetric.sample(smpV, uv).rgb;
     lit += reflections.sample(smpV, uv).rgb;
     lit += giOut.sample(smpV, uv).rgb;
     // Hardware ray-traced shadows (1.0 = fully lit when disabled).
     lit *= mix(1.0, rtShadow.sample(smpV, uv).r, params.rtShadowMix);
-    // Held light source illuminating real geometry (depth-reconstructed world space).
-    lit += worldLight.sample(smpV, uv).rgb;
     outColor.write(float4(lit, color.a), gid);
 }
 
@@ -746,95 +478,4 @@ kernel void mm_rt_shadows(
     }
     float shadow = 1.0 - occluded / (float)rays;
     outShadow.write(float4(shadow, 1.0, 1.0, 1.0), gid);
-}
-
-
-// ----------------------------------------------------------------------------
-// Kernel 11: held light source (torch/lantern) illuminating WORLD geometry
-//   Reconstructs world positions from depth, applies inverse-square falloff with
-//   a normal term so nearby walls, floors and entities are genuinely lit - the
-//   screen-space equivalent of a dynamic light.
-// ----------------------------------------------------------------------------
-
-struct WorldLightParams {
-    float2   viewport;    // 0
-    float    near;        // 8
-    float    far;         // 12
-    float4x4 viewRotInv;  // 16  (transpose of world->eye rotation)
-    float4   eye;         // 80  (world eye position)
-    float4   lightPos;    // 96  (xyz world position, w = radius)
-    float4   lightColor;  // 112 (rgb colour, w = intensity)
-    float    tanHalfFovY; // 128
-    float    aspect;      // 132
-    float    pad0;        // 136
-    float    pad1;        // 140
-};                        // 144
-
-kernel void mm_world_light(
-    texture2d<float>               depthSampler [[texture(0)]],
-    texture2d<float, access::write> outLight   [[texture(1)]],
-    constant WorldLightParams      &p          [[buffer(0)]],
-    uint2 gid                                                 [[thread_position_in_grid]])
-{
-    if (gid.x >= (uint)p.viewport.x || gid.y >= (uint)p.viewport.y) { return; }
-    if (p.lightColor.w <= 0.001) { outLight.write(float4(0.0), gid); return; }
-    constexpr sampler dsmp(address::clamp_to_edge, filter::nearest);
-
-    float2 uv = (float2(gid) + 0.5) / p.viewport;
-    float2 texel = 1.0 / p.viewport;
-
-    // Reconstructs the world position of a screen sample from depth.
-    // (Local lambda-free helper logic is inlined for each sample.)
-    float depthC = depthSampler.sample(dsmp, uv).r;
-    if (depthC <= 0.0) { outLight.write(float4(0.0), gid); return; } // sky: no light
-
-    float distC = p.near * p.far / (depthC * (p.far - p.near) + p.near);
-    float2 ndc = uv * 2.0 - 1.0;
-    float3 eyeC = float3(ndc.x * distC * p.tanHalfFovY * p.aspect,
-                         ndc.y * distC * p.tanHalfFovY,
-                         -distC);
-    float3 wC = (p.viewRotInv * float4(eyeC, 0.0)).xyz + p.eye.xyz;
-
-    // --- Proper normals: neighbour world positions (not NDC offsets) ---
-    float2 uvR = uv + float2(texel.x, 0.0);
-    float2 uvU = uv + float2(0.0, texel.y);
-    float depthR = depthSampler.sample(dsmp, uvR).r;
-    float depthU = depthSampler.sample(dsmp, uvU).r;
-
-    float3 n = float3(0.0, 1.0, 0.0);
-    if (depthR > 0.0 && depthU > 0.0) {
-        float distR = p.near * p.far / (depthR * (p.far - p.near) + p.near);
-        float distU = p.near * p.far / (depthU * (p.far - p.near) + p.near);
-        float2 ndcR = uvR * 2.0 - 1.0;
-        float2 ndcU = uvU * 2.0 - 1.0;
-        float3 eyeR = float3(ndcR.x * distR * p.tanHalfFovY * p.aspect,
-                             ndcR.y * distR * p.tanHalfFovY, -distR);
-        float3 eyeU = float3(ndcU.x * distU * p.tanHalfFovY * p.aspect,
-                             ndcU.y * distU * p.tanHalfFovY, -distU);
-        float3 wR = (p.viewRotInv * float4(eyeR, 0.0)).xyz + p.eye.xyz;
-        float3 wU = (p.viewRotInv * float4(eyeU, 0.0)).xyz + p.eye.xyz;
-        float3 dR = wR - wC;
-        float3 dU = wU - wC;
-        // Ignore huge depth discontinuities (silhouettes) to avoid wild normals.
-        if (length(dR) < 2.0 && length(dU) < 2.0) {
-            n = normalize(cross(dU, dR));
-            if (!isfinite(n.x) || !isfinite(n.y) || !isfinite(n.z)) { n = float3(0.0, 1.0, 0.0); }
-        }
-    }
-    // Normals must face the camera for the Lambert term to light front faces.
-    float3 viewDir = normalize(wC - p.eye.xyz);
-    if (dot(n, viewDir) > 0.0) { n = -n; }
-
-    float3 toLight = p.lightPos.xyz - wC;
-    float d = length(toLight);
-    if (d > p.lightPos.w) { outLight.write(float4(0.0), gid); return; }
-    float3 l = toLight / max(d, 1e-4);
-
-    // Smooth inverse-square-ish falloff that reaches zero at the radius.
-    float x = d / p.lightPos.w;
-    float atten = (1.0 / (1.0 + 6.0 * x * x)) * saturate(1.0 - x * x);
-    // Lambert with a gentle ambient floor so surfaces never go fully black.
-    float lambert = max(dot(n, l), 0.0) * 0.8 + 0.2;
-    float3 contribution = p.lightColor.rgb * p.lightColor.w * atten * lambert;
-    outLight.write(float4(contribution, 1.0), gid);
 }

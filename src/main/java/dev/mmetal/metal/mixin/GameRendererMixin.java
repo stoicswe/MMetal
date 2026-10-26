@@ -6,7 +6,9 @@ import net.minecraft.client.renderer.state.WindowRenderState;
 import org.objectweb.asm.Opcodes;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
+import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.Redirect;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 /**
  * Reduces the world render target resolution for MetalFX upscaling.
@@ -27,6 +29,15 @@ import org.spongepowered.asm.mixin.injection.Redirect;
  */
 @Mixin(GameRenderer.class)
 public abstract class GameRendererMixin {
+
+	private static final String CLEAR_DEPTH = "Lcom/mojang/renderpearl/api/commands/CommandEncoder;"
+		+ "clearDepthTexture(Lcom/mojang/renderpearl/api/textures/GpuTexture;D)V";
+
+	/** render3dHud clears depth before drawing the first-person hand: read the world depth first. */
+	@Inject(method = "render3dHud", at = @At(value = "INVOKE", target = CLEAR_DEPTH), require = 0)
+	private void mmetal$depthBeforeHandClear(CallbackInfo ci) {
+		MetalPipeline.captureDepthBeforeClear();
+	}
 
 	@Redirect(method = "render",
 		at = @At(value = "FIELD",

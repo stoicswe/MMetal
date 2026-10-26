@@ -35,10 +35,8 @@ final class RtShadowBvh {
 	private static final long BOX_STRIDE = 24;
 
 	private final Logger logger;
-	private final Arena arena = Arena.global();
 
 	private float[] boxes = new float[0];
-	private MemorySegment descriptor;
 	private MemorySegment accelerationStructure;
 	private double lastX = Double.NaN;
 	private double lastY;
@@ -133,27 +131,49 @@ final class RtShadowBvh {
 		if (primitiveCount <= 0) {
 			return;
 		}
-		// Geometry descriptor: bounding boxes, stride 24 bytes.
-		MemorySegment geometry = MetalNative.allocInit(
-			ObjC.cls("MTLAccelerationStructureBoundingBoxGeometryDescriptor"));
-		MemorySegment buffer = MetalNative.newBuffer(
-			arena.allocateFrom(ValueLayout.JAVA_FLOAT, Arrays.copyOf(boxes, primitiveCount * FLOATS_PER_BOX)),
-			(long) primitiveCount * BOX_STRIDE);
-		setObject(geometry, "setBoundingBoxBuffer:", buffer);
-		setLong(geometry, "setBoundingBoxCount:", primitiveCount);
-		setLong(geometry, "setBoundingBoxStride:", BOX_STRIDE);
+		// Everything below is created +1 (alloc/new*) and owned by us. The acceleration
+		// structure is the only product we keep: once the build has completed on the GPU,
+		// the geometry, buffer and descriptor are dead weight, and leaking them on every
+		// rebuild (about once a second) grows resident and GPU memory without bound.
+		MemorySegment geometry = null;
+		MemorySegment buffer = null;
+		MemorySegment primitiveDescriptor = null;
+		try (Arena frame = Arena.ofConfined()) {
+			// Geometry descriptor: bounding boxes, stride 24 bytes.
+			geometry = MetalNative.allocInit(ObjC.cls("MTLAccelerationStructureBoundingBoxGeometryDescriptor"));
+			buffer = MetalNative.newBuffer(
+				frame.allocateFrom(ValueLayout.JAVA_FLOAT, Arrays.copyOf(boxes, primitiveCount * FLOATS_PER_BOX)),
+				(long) primitiveCount * BOX_STRIDE);
+			setObject(geometry, "setBoundingBoxBuffer:", buffer);
+			setLong(geometry, "setBoundingBoxCount:", primitiveCount);
+			setLong(geometry, "setBoundingBoxStride:", BOX_STRIDE);
 
-		// Wrap it in an NSMutableArray for the primitive descriptor.
-		MemorySegment array = (MemorySegment) ObjCSend.invoke(
-			ObjC.send(FunctionDescriptor.of(POINTER, POINTER, POINTER)),
-			ObjC.cls("NSMutableArray"), ObjC.sel("array"));
-		ObjCSend.invoke(ObjC.send(FunctionDescriptor.ofVoid(POINTER, POINTER, POINTER)),
-			array, ObjC.sel("addObject:"), geometry);
+			// Wrap it in an NSMutableArray (autoreleased, retained by the descriptor) for the primitive descriptor.
+			MemorySegment array = (MemorySegment) ObjCSend.invoke(
+				ObjC.send(FunctionDescriptor.of(POINTER, POINTER, POINTER)),
+				ObjC.cls("NSMutableArray"), ObjC.sel("array"));
+			ObjCSend.invoke(ObjC.send(FunctionDescriptor.ofVoid(POINTER, POINTER, POINTER)),
+				array, ObjC.sel("addObject:"), geometry);
 
-		descriptor = MetalNative.allocInit(ObjC.cls("MTLPrimitiveAccelerationStructureDescriptor"));
-		setObject(descriptor, "setGeometryDescriptors:", array);
+			primitiveDescriptor = MetalNative.allocInit(ObjC.cls("MTLPrimitiveAccelerationStructureDescriptor"));
+			setObject(primitiveDescriptor, "setGeometryDescriptors:", array);
 
-		accelerationStructure = MetalNative.buildAccelerationStructure(descriptor);
+			MemorySegment previous = accelerationStructure;
+			accelerationStructure = MetalNative.buildAccelerationStructure(primitiveDescriptor);
+			// buildAccelerationStructure waits for completion, and any in-flight command buffer that bound
+			// the previous structure retains it, so dropping our reference is safe.
+			release(previous);
+		} finally {
+			release(primitiveDescriptor);
+			release(geometry);
+			release(buffer);
+		}
+	}
+
+	private static void release(MemorySegment object) {
+		if (object != null && object.address() != 0) {
+			ObjCSend.invoke(ObjC.send(FunctionDescriptor.ofVoid(POINTER, POINTER)), object, ObjC.sel("release"));
+		}
 	}
 
 	private static void setObject(MemorySegment target, String selector, MemorySegment value) {

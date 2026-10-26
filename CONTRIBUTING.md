@@ -13,7 +13,6 @@ First off, thank you so much for considering a contribution to this project. We 
 -   [3. Code Review Process](#code-review)
 -   [4. Community and Communication](#community-and-communication)
 -   [5. Releasing](#releasing)
--   [6. Style plugins](#style-plugins)
 
 <br/>
 
@@ -102,22 +101,6 @@ Full releases are published as GitHub Releases:
 
 Nightly snapshots are separate: [`.github/workflows/nightly.yml`](.github/workflows/nightly.yml)
 runs once a day (06:00 UTC, plus manual dispatch) and only when `src/`, the Gradle files,
-`styles/` or the workflows changed since the newest `nightly_*` tag. Each run publishes a new
-pre-release tagged `nightly_<version>.<date>_<sha>` with the mod jar and the example style plugin;
+the workflows changed since the newest `nightly_*` tag. Each run publishes a new
+pre-release tagged `nightly_<version>.<date>_<sha>` with the mod jar;
 snapshots are never overwritten. Force one any time via **Actions → nightly → Run workflow**.
-
-<br/>
-
-## Style plugins
-
-The Style tab is extensible and needs no changes to the core mod. See
-[`docs/STYLES.md`](docs/STYLES.md) for the kernel contract and two ways to ship a style:
-
--   **Shader-only jars** - a `mmetal/styles.json` manifest plus a `.metallib`, dropped into
-    `mods/` (the example lives in [`styles/legends/`](styles/legends) and is packaged by
-    [`scripts/build-style-legends.sh`](scripts/build-style-legends.sh)).
--   **Code plugins** - a `mmetal:styles` Fabric entrypoint implementing
-    `dev.mmetal.api.MMetalStyleProvider`.
-
-New style contributions are very welcome - adding a style to `styles/` plus a small README entry
-is a great first contribution.

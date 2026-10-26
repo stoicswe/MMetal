@@ -1,12 +1,11 @@
 package dev.mmetal.metal.ui;
 
-import dev.mmetal.api.MMetalStyle;
-import dev.mmetal.api.MMetalStyles;
 import dev.mmetal.metal.config.MMetalConfig;
 import dev.mmetal.metal.nativebridge.MetalFx;
 import dev.mmetal.metal.nativebridge.MetalNative;
 import dev.mmetal.metal.nativebridge.SystemInfo;
 import dev.mmetal.metal.render.MetalPipeline;
+import dev.mmetal.metal.render.MetalStats;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphicsExtractor;
 import net.minecraft.client.gui.components.AbstractSliderButton;
@@ -24,7 +23,7 @@ import java.util.function.DoubleConsumer;
 /**
  * In-game configuration screen for MMetal.
  *
- * <p>Tabs group the options (Render / Ray Tracing / Effects / Held Light); within a
+ * <p>Tabs group the options (Render / Ray Tracing / Motion Blur); within a
  * tab, rows are grouped under section headers and the content scrolls when it does
  * not fit. Open with O, the Options-screen button, or {@code /mmetal ui}.</p>
  */
@@ -34,7 +33,7 @@ public final class MMetalConfigScreen extends Screen {
 	private static final int BH = 18;
 	private static final int TAB_GAP = 4;
 
-	private static final String[] TABS = {"Render", "Ray Tracing", "Effects", "Held Light", "Style"};
+	private static final String[] TABS = {"Render", "Ray Tracing", "Motion Blur"};
 
 	private final MMetalConfig config = MetalPipeline.config();
 
@@ -115,31 +114,15 @@ public final class MMetalConfigScreen extends Screen {
 		switch (tab) {
 			case 0 -> buildRender();
 			case 1 -> buildRayTracing();
-			case 2 -> buildEffects();
-			case 3 -> buildHeldLight();
-			default -> buildStyle();
+			default -> buildMotionBlur();
 		}
 	}
 
 	private void buildRender() {
-		section("Pipeline");
+		section("Upscaling");
 		toggle("MMetal", () -> config.enabled, v -> config.enabled = v);
 		qualityButton();
 		upscaleButton();
-		irisButton();
-		toggle("Frame Interpolation", () -> config.frameInterpolation,
-			v -> config.frameInterpolation = v);
-
-		section("Display");
-		toggle("HDR Output (EDR)", () -> config.hdrOutput, v -> config.hdrOutput = v);
-		slider("HDR Brightness", config.hdrBrightness, 0.5, 2.0,
-			v -> config.hdrBrightness = v, "x");
-		slider("HDR Shadows (darkness)", config.hdrDarkness, 0.0, 1.0,
-			v -> config.hdrDarkness = v, "");
-		paletteButton();
-		toggle("Filmic Tonemap", () -> config.effects.tonemap, v -> config.effects.tonemap = v);
-		slider("Exposure", config.effects.exposure, 0.25, 3.0,
-			v -> config.effects.exposure = v, "x");
 	}
 
 	private void buildRayTracing() {
@@ -177,104 +160,12 @@ public final class MMetalConfigScreen extends Screen {
 			v -> config.effects.reflectionStrength = v, "%");
 	}
 
-	private void buildEffects() {
-		section("Atmosphere");
-		toggle("Volumetric Light", () -> config.effects.volumetricLight,
-			v -> config.effects.volumetricLight = v);
-		slider("Volumetric Strength", config.effects.volumetricStrength, 0.0, 1.0,
-			v -> config.effects.volumetricStrength = v, "%");
-
-		section("Post Processing");
-		toggle("Bloom / Emissive Glow", () -> config.effects.bloom,
-			v -> config.effects.bloom = v);
-		slider("Bloom Strength", config.effects.bloomStrength, 0.0, 1.0,
-			v -> config.effects.bloomStrength = v, "%");
+	private void buildMotionBlur() {
+		section("Motion Blur");
 		toggle("Motion Blur", () -> config.effects.motionBlur,
 			v -> config.effects.motionBlur = v);
 		slider("Motion Blur Amount", config.effects.motionBlurStrength, 0.0, 1.0,
 			v -> config.effects.motionBlurStrength = v, "%");
-	}
-
-	private void buildHeldLight() {
-		section("Held Light");
-		toggle("Held Light Glow", () -> config.effects.heldLightGlow,
-			v -> config.effects.heldLightGlow = v);
-		slider("Held Light Strength", config.effects.heldLightStrength, 0.0, 1.0,
-			v -> config.effects.heldLightStrength = v, "%");
-		toggle("Firelight Flicker", () -> config.effects.heldLightFlicker,
-			v -> config.effects.heldLightFlicker = v);
-
-		section("Torch Flame");
-		toggle("Flame Particles", () -> config.effects.heldLightParticles,
-			v -> config.effects.heldLightParticles = v);
-		slider("Flame Height", config.effects.flameTipHeight, 0.0, 0.8,
-			v -> config.effects.flameTipHeight = v, "m");
-	}
-
-	private void buildStyle() {
-		section("Look");
-		styleButton();
-		slider("Style Strength", config.styleStrength, 0.0, 1.0,
-			v -> config.styleStrength = v, "%");
-
-		section("About");
-		int y = nextRow();
-		if (y >= 0) {
-			Button about = Button.builder(Component.literal(currentStyleDescription()), b -> {
-				})
-				.bounds(rowX(), y, rowW(), BH).build();
-			about.active = false;
-			addRenderableWidget(about);
-		}
-		int hintY = nextRow();
-		if (hintY >= 0) {
-			Button hint = Button.builder(
-					Component.literal("Drop style jars in mods/ - see docs/STYLES.md"), b -> {
-					})
-				.bounds(rowX(), hintY, rowW(), BH).build();
-			hint.active = false;
-			addRenderableWidget(hint);
-		}
-	}
-
-	private String currentStyleDescription() {
-		MMetalStyle style = MMetalStyles.get(config.styleId);
-		String text = style.description() == null ? "" : style.description();
-		return text.length() > 58 ? text.substring(0, 55) + "..." : text;
-	}
-
-	private void styleButton() {
-		int y = nextRow();
-		if (y < 0) {
-			return;
-		}
-		Button button = Button.builder(styleLabel(), b -> {
-			java.util.List<MMetalStyle> styles = MMetalStyles.all();
-			int index = 0;
-			for (int i = 0; i < styles.size(); i++) {
-				if (styles.get(i).id().equalsIgnoreCase(config.styleId)) {
-					index = i;
-					break;
-				}
-			}
-			MMetalStyle next = styles.get((index + 1) % styles.size());
-			config.styleId = next.id();
-			if (config.styleStrength <= 0.01) {
-				config.styleStrength = next.defaultStrength();
-			}
-			b.setMessage(styleLabel());
-			MetalPipeline.onConfigMutated();
-			rebuildWidgets();
-		}).bounds(rowX(), y, rowW(), BH).build();
-		// Nothing to choose from: keep the button visible but inert.
-		button.active = MMetalStyles.all().size() > 1;
-		addRenderableWidget(button);
-	}
-
-	private Component styleLabel() {
-		MMetalStyle style = MMetalStyles.get(config.styleId);
-		String tag = style.builtIn() ? "" : " (mod)";
-		return Component.literal("Style: " + style.displayName() + tag);
 	}
 
 	// ---------------------------------------------------------------- rows
@@ -367,56 +258,6 @@ public final class MMetalConfigScreen extends Screen {
 		}).bounds(rowX(), y, rowW(), BH).build());
 	}
 
-	/** Cycles the behaviour while an Iris shader pack renders (see MMetalConfig.IrisMode). */
-	private void irisButton() {
-		int y = nextRow();
-		if (y < 0) {
-			return;
-		}
-		addRenderableWidget(Button.builder(irisLabel(), b -> {
-			MMetalConfig.IrisMode[] modes = MMetalConfig.IrisMode.values();
-			config.irisMode = modes[(config.irisMode.ordinal() + 1) % modes.length];
-			b.setMessage(irisLabel());
-			MetalPipeline.onConfigMutated();
-		}).bounds(rowX(), y, rowW(), BH).build());
-	}
-
-	private Component irisLabel() {
-		String detail = switch (config.irisMode) {
-			case STAND_DOWN -> "vanilla passthrough";
-			case METALFX -> "MetalFX + framegen";
-			case FULL -> "full pipeline";
-		};
-		return Component.literal("With Shaders: " + detail);
-	}
-
-	/** Cycles the display palette (see MMetalConfig.Palette). */
-	private void paletteButton() {
-		int y = nextRow();
-		if (y < 0) {
-			return;
-		}
-		addRenderableWidget(Button.builder(paletteLabel(), b -> {
-			MMetalConfig.Palette[] palettes = MMetalConfig.Palette.values();
-			config.palette = palettes[(config.palette.ordinal() + 1) % palettes.length];
-			b.setMessage(paletteLabel());
-			MetalPipeline.onConfigMutated();
-		}).bounds(rowX(), y, rowW(), BH).build());
-	}
-
-	private Component paletteLabel() {
-		String detail = switch (config.palette) {
-			case FILMIC -> "Filmic (SDR)";
-			case EXTENDED -> "Extended (HDR look)";
-			case VIBRANT -> "Vibrant (vanilla-like)";
-			case WARM -> "Warm (golden)";
-			case COOL -> "Cool (blue)";
-			case NATURAL -> "Natural (minimal HDR)";
-			case NEUTRAL -> "Neutral (raw)";
-		};
-		return Component.literal("Palette: " + detail);
-	}
-
 	private void rayCountButton() {
 		int y = nextRow();
 		if (y < 0) {
@@ -475,10 +316,6 @@ public final class MMetalConfigScreen extends Screen {
 		config.enabled = true;
 		config.qualityPreset = MMetalConfig.QualityPreset.QUALITY;
 		config.upscaleMode = MMetalConfig.UpscaleMode.SPATIAL;
-		config.frameInterpolation = false;
-		config.hdrOutput = false;
-		config.styleId = "none";
-		config.styleStrength = 1.0;
 		config.effects = new MMetalConfig.Effects();
 		MetalPipeline.onConfigMutated();
 	}
@@ -487,6 +324,10 @@ public final class MMetalConfigScreen extends Screen {
 		MMetalConfig.QualityPreset preset = config.qualityPreset;
 		if (preset == MMetalConfig.QualityPreset.NONE) {
 			return Component.literal("Quality: None (Native)");
+		}
+		if (preset == MMetalConfig.QualityPreset.DYNAMIC) {
+			return Component.literal(String.format(Locale.ROOT, "Quality: Dynamic (%.0f%% now)",
+				MetalStats.dynamicScale * 100));
 		}
 		return Component.literal(String.format(Locale.ROOT, "Quality: %s (%.0f%%)",
 			preset.label, preset.scale * 100));
@@ -531,12 +372,10 @@ public final class MMetalConfigScreen extends Screen {
 		if (!MetalNative.available()) {
 			return "no Metal device";
 		}
-		return String.format("%s | spatial=%s temporal=%s frameInterpolation=%s",
+		return String.format("%s | spatial=%s temporal=%s",
 			MetalNative.deviceName(),
 			MetalFx.supportsSpatial(MetalNative.device()),
-			MetalFx.supportsTemporal(MetalNative.device()),
-			SystemInfo.supportsFrameInterpolation()
-				&& MetalFx.supportsFrameInterpolation(MetalNative.device()));
+			MetalFx.supportsTemporal(MetalNative.device()));
 	}
 
 	public static void open() {

@@ -11,8 +11,8 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 /**
  * The last stop of every rendered frame: {@link GlSurface#present()} is what actually
  * swaps the SDL window. MMetal injects at its head, runs the Metal pipeline (capture
- * &rarr; MetalFX &rarr; effects &rarr; frame interpolation), draws the result to the
- * default framebuffer, performs the swap(s) itself and cancels the vanilla body.
+ * &rarr; MetalFX &rarr; ray traced lighting &rarr; motion blur), draws the result to the
+ * default framebuffer, performs the swap itself and cancels the vanilla body.
  */
 @Mixin(value = GlSurface.class, remap = false)
 public abstract class GlSurfaceMixin {

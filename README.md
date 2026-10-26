@@ -5,13 +5,11 @@
 MMetal puts Apple's modern GPU stack to work on Minecraft 26.3 (the latest full release) through Fabric:
 
 - **MetalFX Upscaling** – render the world at a lower tier (Ultra Performance → Quality) and let Apple's MetalFX spatial or temporal scaler restore full resolution every frame.
-- **MetalFX Frame Interpolation** – on macOS 26+, Metal 4's frame interpolator generates intermediate frames from depth-reprojected motion vectors.
-- **Metal compute lighting** – ray-marched sun shadows + ambient occlusion, volumetric light shafts, and camera motion blur, executed as real Metal compute kernels while Minecraft's OpenGL renderer keeps working.
-- **Filmic display transform** – linear-light highlight rolloff with exposure control (the sun stops clipping flat white).
-- **True HDR (experimental)** – presents through a Metal `CAMetalLayer` with extended-range sRGB so highlights exceed SDR white on EDR displays.
-- **Sodium & Iris friendly** – MMetal hooks *below* both mods at the swapchain present; while an Iris shader pack is active it stands down gracefully.
+- **Ray traced lighting** – ray-marched sun shadows, ambient occlusion, reflections and global illumination, plus optional hardware ray-traced shadows (Metal acceleration structures), executed as real Metal compute kernels while Minecraft's OpenGL renderer keeps working.
+- **Motion blur** – camera-motion blur blended on the Metal side.
+- **Sodium & Iris friendly** – MMetal hooks *below* both mods at the swapchain present; while an Iris shader pack is active it only upscales and leaves the look to the pack.
 
-> **Requirements:** Apple Silicon Mac; macOS 13+ (MetalFX upscaling), macOS 26+ for Frame Interpolation; Minecraft **26.3**; **Fabric Loader ≥ 0.20.1**; **Java 25+**.
+> **Requirements:** Apple Silicon Mac; macOS 13+ (MetalFX upscaling); Minecraft **26.3**; **Fabric Loader ≥ 0.20.1**; **Java 25+**.
 >
 > **Use a HotSpot JDK** (Temurin, Microsoft OpenJDK, Oracle, Homebrew `openjdk`). IBM Semeru / OpenJ9 has a concurrency bug in its foreign-function implementation that MMetal's native calls can trigger (the JVM aborts inside its FFI machinery). Mojang's launcher ships a HotSpot-derived runtime, so normal installs are unaffected.
 
@@ -35,27 +33,25 @@ Open **MMetal Settings** with:
 | Control | Effect |
 | --- | --- |
 | **MMetal: ON/OFF** | Master switch; when off, vanilla frames pass through untouched |
-| **Quality** | Upscaling tier: Ultra Performance (33%), Performance (50%), Balanced (58%), Quality (67%), None (native) |
+| **Quality** | Upscaling tier: Ultra Performance (33%), Performance (50%), Balanced (58%), Quality (67%), Dynamic (auto), None (native) |
+| **Dynamic scaling** | The `Dynamic` quality tier adjusts the render scale (default 50-100%, in 5% steps) to hold the display refresh rate / Max FPS. Tune with `dynamicMinScale`, `dynamicMaxScale` and `dynamicTargetFps` (0 = match display; set it to 60 on a 120 Hz panel you cannot saturate) in `config/mmetal.json` |
 | **Upscale** | `SPATIAL` (recommended), `TEMPORAL` (experimental), `OFF` |
-| **Frame Interpolation** | MetalFX frame generation (macOS 26+); pauses automatically while a menu is open |
-| **Post Processing** | Master switch for all Metal-compute effects |
+| **Post Processing** | Master switch for the Metal-compute effects |
 | **Ray Traced Lighting** | Screen-space ray-marched sun shadows + AO |
-| **Sun Shadows / Ambient Occlusion** | Individual effect toggles |
-| **Volumetric Light** | God-rays toward the sun |
+| **RT Shadows / RT Ambient Occlusion** | Individual effect toggles |
+| **RT Reflections / RT Global Illumination** | Screen-space reflections and colour bounce |
+| **RT Shadows (Hardware)** | Block-BVH shadow rays traced on the GPU |
 | **Motion Blur** | Camera-motion blur |
-| **Filmic Tonemap** | Highlight rolloff so the sun doesn't clip flat white |
-| **HDR Output (EDR)** | Experimental true-HDR presentation through a Metal layer |
 
-Sliders: Sun Strength, AO Strength, Volumetric Strength, Motion Blur Amount, Exposure.
+Sliders: Shadow Strength, AO Strength, GI Strength, Reflection Strength, Ray Length, Motion Blur Amount.
 
 ### Commands
 
 ```
 /mmetal ui            open the settings screen
 /mmetal status        capability report + current config
-/mmetal quality       ULTRA_PERFORMANCE | PERFORMANCE | BALANCED | QUALITY | NONE
+/mmetal quality       ULTRA_PERFORMANCE | PERFORMANCE | BALANCED | QUALITY | DYNAMIC | NONE
 /mmetal upscale       OFF | SPATIAL | TEMPORAL
-/mmetal framegen      true|false
 /mmetal effects / shadows / ao    true|false
 /mmetal sunstrength / aostrength  0..1
 /mmetal reload        re-read config/mmetal.json
@@ -70,8 +66,6 @@ Written on first launch; hot-reloaded when saved.
   "enabled": true,
   "qualityPreset": "QUALITY",
   "upscaleMode": "SPATIAL",
-  "frameInterpolation": false,
-  "hdrOutput": false,
   "effects": {
     "enabled": true,
     "rayTracing": true,
@@ -83,12 +77,11 @@ Written on first launch; hot-reloaded when saved.
     "rayLength": 6.0,
     "sunElevationDeg": 55.0,
     "sunAzimuthDeg": 135.0,
-    "volumetricLight": true,
-    "volumetricStrength": 0.15,
     "motionBlur": false,
     "motionBlurStrength": 0.3,
-    "tonemap": true,
-    "exposure": 1.0
+    "reflections": false,
+    "globalIllumination": false,
+    "hardwareRtShadows": false
   }
 }
 ```
@@ -116,7 +109,7 @@ Expected log on a healthy start:
 ```
 MMetal booting: macOS 27.2, Java 27, Sodium=present, Iris=absent
 Metal device: Apple M3
-MetalFX spatial: yes, temporal: true, frame interpolation: true
+MetalFX spatial: yes, temporal: true
 MMetal Metal compute library loaded (shadows/AO/motion kernels ready).
 MMetal render target: 3024x1898 -> 2016x1265 (scale 0.6666667)
 MMetal resources ready: 2016x1265 -> 3024x1898 (upscale=true effects=true fi=false)
@@ -128,10 +121,8 @@ MMetal resources ready: 2016x1265 -> 3024x1898 (upscale=true effects=true fi=fal
 2. **Upscaling** – Quality: Balanced / Performance; check sharpness and full-window coverage in *windowed and fullscreen*, resize the window, toggle fullscreen.
 3. **Clicks** – buttons on the title screen, options screens and MMetal settings must respond where they are drawn (mouse mapping).
 4. **Live preset switching** – change quality with a screen open; the screen must re-layout and stay clickable.
-5. **Effects** – Ray Traced Lighting on/off, volumetric strength, motion blur, exposure.
-6. **Frame interpolation** – macOS 26+, set Max FPS to half your refresh rate; menus must not ghost (history resets on UI changes).
-7. **HDR** – on an EDR display, enable HDR Output.
-8. **Sodium + Iris** – repeat 2; with an active shader pack MMetal stands down (check the log).
+5. **Effects** – Ray Traced Lighting on/off, reflections, GI, motion blur.
+6. **Sodium + Iris** – repeat 2; with an active shader pack MMetal only upscales.
 
 ## Architecture (short version)
 
@@ -143,9 +134,9 @@ Game (GL, RenderPearl) ──render──▶ main render target (reduced resolut
         ▼ GlSurface.present() mixin
 IOSurface capture (GL blit + packed depth)      ← zero-copy GL↔Metal
         ▼
-Metal: MetalFX upscale ─▶ RT shadows/AO ─▶ volumetric ─▶ motion blur ─▶ tonemap
+Metal: MetalFX upscale ─▶ RT shadows/AO/reflections/GI ─▶ motion blur
         ▼
-IOSurface → GL quad → SDL swap (×2 when interpolating)   [or EDR CAMetalLayer]
+IOSurface → GL quad → SDL swap
 ```
 
 Coordinate-space invariants (important — these caused real bugs):
@@ -166,12 +157,10 @@ Full details — FFI layer, IOSurface sync rules, kernels, failure policy — in
 ## Known limitations (v0.1.0)
 
 - **GUI renders at the scaled resolution** together with the world (soft text at aggressive tiers). A native-resolution UI pass was prototyped and removed: the vanilla GUI bakes fullscreen layer rectangles from the framebuffer size, so rendering it into a differently-sized target shifts its background layers.
-- **Frame Interpolation is experimental** — camera-only motion vectors (exact for world motion, approximate for entities); one extra frame of latency; paused while menus are open.
 - **Temporal upscaling is experimental** — history resets on UI state changes; some ghosting on fast entity motion. `SPATIAL` is the recommended default.
 - **Screen-space ray marching** drives AO, reflections and GI; hardware RT shadows use a
   per-frame block BVH (Metal 4 acceleration structures) and are best-effort (quality
   tiers, incremental rebuild is future work).
-- **HDR output is experimental** and needs an EDR display.
 - The frame is CPU/GPU-synchronised at present (`glFinish` + `waitUntilCompleted`); a shared-event fence path is planned to remove the small stall.
 - If anything fails, MMetal disables itself for the session with a clear log message — it never takes the game down.
 
@@ -180,18 +169,16 @@ Full details — FFI layer, IOSurface sync rules, kernels, failure policy — in
 Every push/PR builds the jar on `ubuntu-latest` with Temurin 25 (`.github/workflows/build.yml`); artifacts are uploaded and attached to GitHub Releases on tag builds.
 
 **Nightly pre-releases** (`.github/workflows/nightly.yml`) run once a day at 06:00 UTC
-(and on demand) — but only when `src/`, the build files, `styles/` or the workflows
+(and on demand) — but only when `src/`, the build files, the workflows
 changed since the newest `nightly_*` tag. Each run publishes a new pre-release
-(`nightly_<version>.<date>_<sha>`) containing the mod jar and the example Legends style
-plugin; snapshots are never overwritten. Run it manually any time with
+(`nightly_<version>.<date>_<sha>`) containing the mod jar; snapshots are never overwritten. Run it manually any time with
 **Actions → nightly → Run workflow**.
 
 ## Contributing
 
-Contributions are welcome - bug reports, fixes, and new style plugins alike. Please read
+Contributions are welcome - bug reports and fixes alike. Please read
 [`CONTRIBUTING.md`](CONTRIBUTING.md) for the workflow and coding style, and
-[`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md) for community expectations. Style plugin
-guidance lives in [`docs/STYLES.md`](docs/STYLES.md).
+[`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md) for community expectations.
 
 ## Credits
 

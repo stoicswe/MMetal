@@ -5,7 +5,7 @@ name: nightly
 #   1. changes  - compare the default branch HEAD against the newest `nightly_*` tag.
 #                 Build only when build-affecting paths changed since then; manual
 #                 dispatches always build. A day with no changes produces nothing.
-#   2. build    - ./gradlew build, then package the mod jar + the example style plugin.
+#   2. build    - ./gradlew build, then package the mod jar.
 #   3. release  - publish a NEW GitHub PRE-release per run, tagged
 #                 nightly_<mod version>.<UTC date>_<sha>. Every snapshot keeps its own
 #                 assets; nothing is replaced, and the newest sorts to the top.
@@ -73,7 +73,7 @@ jobs:
             echo "should_build=true" >> "$GITHUB_OUTPUT"
           else
             CHANGED="$(git diff --name-only "$BASE"..HEAD -- \
-              src gradle styles build.gradle build.gradle.kts settings.gradle \
+              src gradle build.gradle build.gradle.kts settings.gradle \
               settings.gradle.kts gradle.properties .github/workflows || true)"
             if [ -n "$CHANGED" ]; then
               echo "build-affecting changes:"
@@ -133,13 +133,6 @@ jobs:
               *) cp "$jar" dist/ ;;
             esac
           done
-          # Example style plugin: packaged from the committed metallib (no xcrun on Linux).
-          if [ -f styles/legends/assets/mmetal_legends/metal/legends.metallib ]; then
-            (cd styles/legends && zip -q -r "$GITHUB_WORKSPACE/dist/mmetal-style-legends.jar" \
-              fabric.mod.json mmetal assets)
-          else
-            echo "::warning::Legends metallib missing - skipping the example style plugin"
-          fi
           ls -la dist
 
       - name: Upload assets
@@ -176,7 +169,6 @@ jobs:
 
             ### Assets
             - **`mmetal-*.jar`** - the mod; drop it into `.minecraft/mods`
-            - **`mmetal-style-legends.jar`** - example style plugin (optional); also into `mods/`
 
             ### Changes since the last nightly
             ```

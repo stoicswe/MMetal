@@ -94,12 +94,9 @@ Minecraft.renderFrame(boolean)
   `Linker.Option.critical(false)` (`isTrivial` was removed in Java 26). Every call has
   a fixed descriptor; on arm64 that matches clang's ObjC call sites.
 - `MetalNative`/`MetalFx` — device, queue, textures, IOSurface-backed textures,
-  command buffers/encoders, `MTLFXSpatialScaler`, `MTLFXTemporalScaler`,
-  `MTLFXFrameInterpolator` (descriptors and instances).
+  command buffers/encoders, `MTLFXSpatialScaler`, `MTLFXTemporalScaler`  (descriptors and instances).
 - `IosurfaceBridge` — IOSurface + CoreFoundation dictionary plumbing +
   `CGLTexImageIOSurface2D` + `CFRelease`.
-- `HdrPresenter` — EDR `CAMetalLayer` overlay (QuartzCore/AppKit) and drawable
-  acquisition.
 
 Selector gotchas learned the hard way: it is `newLibraryWithURL:error:` (not
 `…ContentsOfURL:`); `newFunctionWithName:` takes an `NSString*`, not a C string;
@@ -114,34 +111,39 @@ Metal command buffer  :
   1. mm_depth          inDepth → depthR32                     (R32Float)
   2. MetalFX scaler    inColor → privateFull                  (full W×H)
   3. mm_ssr_shadows    depthR32+privateFull → mask            (if Ray Traced Lighting)
-     mm_volumetric     privateFull+depthR32 → volumetric      (if Volumetric Light)
-     mm_composite      privateFull+mask+volumetric → postFx
+     mm_reflections / mm_rtgi / mm_rt_shadows                 (if enabled)
+     mm_composite      privateFull+mask+refl+gi+rtShadow → postFx
   4. mm_motionblur     postFx+prevColor → blurred             (if Motion Blur)
-  5. motion + FI       postFx+prevColor+depthR32+motion → interpPrivate (if FI)
-  6. mm_tonemap        [interp|postFx] → tonemapped           (SDR, filmic knee)
-     blit              → outColor (IOSurface)  |  HDR: tonemap into EDR drawable
-  7. prevColor ← postFx (pre-tonemap; consistent encoding for FI/blur)
+  5. blit              → outColor (IOSurface)
+     prevColor ← pre-blur image
 GL present            : draw outColor → FB0 → SDL swap
-                        (FI: interpolated frame first, then the real frame)
 ```
-
-### Display transform
-
-The framebuffer is **display-referred** (sRGB-encoded). ACES applied directly lifts
-every midtone ~50% (washed-out frames). MMetal instead decodes to linear, applies a
-soft-knee highlight compressor (identity below 0.8, smooth rolloff above), and
-re-encodes: midtones are pixel-exact, only the sun/highlights roll off.
-
-HDR mode (EDR): decode to scene-linear, boost bright content into the display's
-headroom (`layer.maximumExtendedDynamicRangeColorComponentValue`) and write
-`RGBA16Float` into a `CAMetalLayer` with `kCGColorSpaceExtendedLinearSRGB`; the OS
-tonemaps to the panel. The GL swap is skipped while the layer is active.
 
 ### Temporal hygiene
 
-Temporal upscaling and frame interpolation blend history — never across a UI state
-change. When `Minecraft.gui.screen()` appears/disappears, MMetal sets the scaler's
-reset flag, resets the interpolator history, and pauses FI while a screen is open.
+Temporal upscaling and motion blur blend history — never across a UI state change.
+When `Minecraft.gui.screen()` appears/disappears, MMetal sets the scaler's reset flag and
+motion blur skips the blend for that frame.
+
+### Depth capture (important, learned the hard way)
+
+- `GameRenderer.render3dHud` clears the main depth texture (to 0.0) before drawing the
+  first-person hand, and `render()` clears it again before the GUI. By the GUI phase the
+  whole texture is zero. `GameRendererMixin` therefore reads **world depth just before the
+  first clear** (`captureDepthBeforeClear`).
+- The depth is packed as 24 bits in BGRA8, each byte divided by 255 on the GL side.
+  `mmetalUnpackDepth` restores the bytes (x255) - without that every depth was 255x too
+  small, i.e. all geometry hundreds of metres away: no usable depth for any effect.
+
+### Dynamic scaling
+
+The `DYNAMIC` quality preset hands the render scale to `DynamicResolution`, a frame-time
+feedback controller. Each present feeds it the measured interval; once per ~0.75 s window
+it steps the scale down (sized by `sqrt(target/avg)`) when the target is missed, or probes
+one 5% step up when it is met. A size change rebuilds the size-bound resources, and those
+are never freed (`destroyTexture`), so the controller uses coarse steps and exponential
+back-off after a probe that immediately missed. The target is the display refresh (or
+`dynamicTargetFps`) capped by Max FPS - Samples are ignored while a screen is open and while a resize settles.
 
 ## 6. Failure policy
 
